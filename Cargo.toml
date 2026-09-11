@@ -1,0 +1,31 @@
+[package]
+name = "bot-gate"
+version = "0.1.0"
+edition = "2021"
+description = "Cross-platform local web bot gate and reverse proxy"
+license = "MIT"
+publish = false
+
+[dependencies]
+anyhow = "1"
+axum-server = { version = "0.7.2", features = ["tls-rustls"] }
+argon2 = "0.5"
+password-hash = { version = "0.5", features = ["getrandom"] }
+axum = "0.8"
+base64 = "0.22"
+hmac = "0.12"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["client", "http1"] }
+hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
+ipnet = "2"
+rand = "0.9"
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
+toml = "0.8"
+tower-http = { version = "0.6", features = ["limit"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+url = "2"

@@ -1,0 +1,87 @@
+# Current baseline configuration: HTTP reverse proxy, browser verification,
+# rate limiting, scanner detection and SQLite persistence.
+# Set [admin] below to enable the loopback-only management UI.
+
+[server]
+# Use 0.0.0.0 only when the gate must be reachable from the LAN.
+listen = "127.0.0.1:8080"
+request_timeout_secs = 30
+max_header_bytes = 65536
+max_body_size = 104857600
+
+# Optional HTTPS listener. Keep disabled until you have a certificate and key.
+[tls]
+enabled = false
+listen = "127.0.0.1:8443"
+cert_file = "data/tls/cert.pem"
+key_file = "data/tls/key.pem"
+# Redirect recognized configured hosts from [server] to this listener.
+redirect_http = false
+
+[verification]
+enabled = true
+cookie_name = "bot_verified"
+cookie_ttl = "30m"
+challenge_ttl = "60s"
+max_attempts = 5
+pow_difficulty = 4
+bind_ip = true
+secret_file = "data/secret.key"
+
+[security.rate_limit]
+enabled = true
+requests_per_second = 10.0
+burst = 20
+skip_whitelist = false
+
+[security.scanner_detection]
+enabled = true
+max_404_per_minute = 30
+max_distinct_paths_per_minute = 60
+risk_limit_threshold = 50
+risk_challenge_threshold = 70
+risk_ban_threshold = 90
+sensitive_paths = ["/.env", "/.git/", "/wp-admin", "/phpmyadmin", "/admin", "/actuator", "/swagger", "/swagger-ui", "/api-docs", "/backup", "/config", "/test"]
+
+[security.ban]
+enabled = true
+duration = "10m"
+
+[security.whitelist]
+ips = ["127.0.0.1"]
+networks = []
+skip_challenge = true
+skip_rate_limit = false
+
+[storage]
+enabled = true
+database = "data/bot-gate.db"
+log_retention = "7d"
+persist_request_logs = true
+
+# This listener must remain on a loopback address.
+[admin]
+enabled = true
+listen = "127.0.0.1:9090"
+password_file = "data/admin-password.hash"
+session_ttl = "8h"
+
+[upstream]
+# Phase 1 defaults to loopback-only upstreams to reduce SSRF risk.
+allow_loopback = true
+allow_private_networks = false
+# Domain upstreams are resolved per request and accepted only when they resolve
+# to an allowed loopback/private address.
+allow_dns = false
+
+[[sites]]
+host = "project-a.test"
+target = "http://127.0.0.1:9001"
+policy = "normal"
+enabled = true
+
+[[sites]]
+host = "project-b.test"
+target = "http://127.0.0.1:9002"
+policy = "strict"
+enabled = true
