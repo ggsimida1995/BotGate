@@ -4,7 +4,7 @@
 
 HTTP server, TOML configuration, exact Host routing, HTTP reverse proxy, forwarded headers, size limits, timeout handling and basic upstream SSRF validation.
 
-Acceptance: browser and curl reach the configured upstream; unknown Hosts do not; a stopped upstream returns 502/504; `cargo fmt --check`, `cargo clippy -- -D warnings` and `cargo test` pass.
+Acceptance: a browser reaches the configured upstream after the Challenge, while an unverified curl/API request is stopped before the upstream; unknown Hosts do not; a stopped upstream returns 502/504; from `backend/`, `cargo fmt --check`, `cargo clippy -- -D warnings`, and `cargo test` pass, and from `frontend/`, `npm run build` passes.
 
 ## Phase 2 — complete
 
@@ -20,17 +20,17 @@ SQLite schema, asynchronous batched request/security logs, retention cleanup and
 
 ## Phase 5 — complete
 
-Completed: loopback-only admin UI, Argon2id password setup, signed sessions, dashboard, and SQLite-backed site/ban/whitelist management with immediate runtime application.
+Completed: loopback-only admin UI, dashboard, and SQLite-backed site/ban/whitelist management with immediate runtime application. The admin listener intentionally has no password login because it is restricted to loopback.
 
-Completed: authenticated `POST /api/reload` safely validates TOML and atomically reloads sites and whitelist rules; listener and process-lifetime settings still require restart.
+Completed: loopback-only `POST /api/reload` safely validates TOML and atomically reloads sites and whitelist rules; listener and process-lifetime settings still require restart.
 
 ## Phase 6 — core complete
 
 DNS-aware SSRF checks are complete. Domain upstreams are opt-in via `upstream.allow_dns`, resolved per request, and connected through the checked address. Optional Rustls HTTPS, redirects from HTTP for configured hosts, and certificate/key reload are implemented. WebSocket/SSE support and intentionally unbuffered large uploads remain separate future work.
 
-## Phase 7
+## Phase 7 — release pipeline complete
 
-Windows Service commands, systemd/launchd examples, GitHub Actions release matrix, archives, checksums and cross-platform packaging.
+GitHub Actions builds Windows x64, Linux x64 and macOS arm64 archives with SHA-256 checksums. The current workflow builds directly from this repository; source/release repository separation remains future work. Windows Service commands and systemd/launchd examples also remain future work.
 
 ## Deferred by design
 

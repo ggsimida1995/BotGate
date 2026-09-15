@@ -1,4 +1,9 @@
-/target/
-config.toml
-data/
+/backend/target/
+backend/config.toml
+backend/data/
 logs/
+.DS_Store
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+.codegraph/

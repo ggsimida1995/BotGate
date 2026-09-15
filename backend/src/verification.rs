@@ -22,12 +22,23 @@ use crate::*;
 const MAX_ACTIVE_CHALLENGES: usize = 10_000;
 
 #[derive(Debug, Clone)]
+pub(crate) struct RedirectState {
+    pub(crate) site: String,
+    pub(crate) remote_ip: IpAddr,
+    pub(crate) return_path: String,
+    pub(crate) verify_path: String,
+    pub(crate) expires_at: u64,
+    pub(crate) used: bool,
+}
+
+#[derive(Debug, Clone)]
 pub(crate) struct Challenge {
     pub(crate) id: String,
     pub(crate) nonce: String,
     pub(crate) site: String,
     pub(crate) remote_ip: IpAddr,
     pub(crate) return_path: String,
+    pub(crate) verify_path: String,
     pub(crate) issued_at: u64,
     pub(crate) expires_at: u64,
     pub(crate) signature: String,
@@ -56,6 +67,8 @@ pub(crate) struct VerificationState {
     pub(crate) config: VerificationConfig,
     pub(crate) secret: Vec<u8>,
     pub(crate) challenges: Mutex<HashMap<String, Challenge>>,
+    pub(crate) redirects: Mutex<HashMap<String, RedirectState>>,
+    pub(crate) routes: Mutex<HashMap<String, u64>>,
 }
 
 pub(crate) fn random_token(bytes: usize) -> String {
@@ -72,8 +85,13 @@ pub(crate) fn hmac_sha256(secret: &[u8], data: &[u8]) -> Vec<u8> {
 
 pub(crate) fn challenge_signature(secret: &[u8], challenge: &Challenge) -> String {
     let material = format!(
-        "{}|{}|{}|{}|{}",
-        challenge.id, challenge.nonce, challenge.issued_at, challenge.expires_at, challenge.site
+        "{}|{}|{}|{}|{}|{}",
+        challenge.id,
+        challenge.nonce,
+        challenge.issued_at,
+        challenge.expires_at,
+        challenge.site,
+        challenge.verify_path
     );
     URL_SAFE_NO_PAD.encode(hmac_sha256(secret, material.as_bytes()))
 }
@@ -161,20 +179,116 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-pub(crate) fn verification_redirect(request: &Request<Body>) -> Response<Body> {
-    let return_path = request
-        .uri()
-        .path_and_query()
-        .map_or_else(|| "/".to_string(), ToString::to_string);
+fn create_redirect_state(
+    verification: &VerificationState,
+    site: &str,
+    remote_ip: IpAddr,
+    return_path: String,
+) -> Option<String> {
+    let now = unix_now();
+    let token = random_token(24);
+    let verify_path = format!("/{}", random_token(24));
+    let mut redirects = verification.redirects.lock().ok()?;
+    redirects.retain(|_, redirect| {
+        redirect
+            .expires_at
+            .saturating_add(verification.config.challenge_ttl_secs)
+            > now
+    });
+    if redirects.len() >= MAX_ACTIVE_CHALLENGES {
+        return None;
+    }
+    let expires_at = now.saturating_add(verification.config.challenge_ttl_secs);
+    redirects.insert(
+        token.clone(),
+        RedirectState {
+            site: site.to_string(),
+            remote_ip,
+            return_path,
+            verify_path: verify_path.clone(),
+            expires_at,
+            used: false,
+        },
+    );
+    if let Ok(mut routes) = verification.routes.lock() {
+        routes.retain(|_, route_expires_at| *route_expires_at > now);
+        routes.insert(
+            verify_path,
+            expires_at.saturating_add(verification.config.challenge_ttl_secs * 2),
+        );
+    }
+    Some(token)
+}
+
+pub(crate) fn is_verification_path(verification: &VerificationState, path: &str) -> bool {
+    let Some((route, endpoint)) = path.rsplit_once('/') else {
+        return false;
+    };
+    if route.is_empty() || !matches!(endpoint, "start" | "submit") {
+        return false;
+    }
+    let now = unix_now();
+    verification
+        .routes
+        .lock()
+        .ok()
+        .map(|mut routes| {
+            routes.retain(|_, expires_at| *expires_at > now);
+            routes.contains_key(route)
+        })
+        .unwrap_or(false)
+}
+
+fn redirect_response(
+    state: &AppState,
+    remote_ip: IpAddr,
+    site: &str,
+    return_path: String,
+) -> Response<Body> {
+    let Some(token) = create_redirect_state(&state.verification, site, remote_ip, return_path)
+    else {
+        return response_with(
+            StatusCode::TOO_MANY_REQUESTS,
+            "text/plain; charset=utf-8",
+            "too many active verification requests",
+        );
+    };
+    let verify_path = state
+        .verification
+        .redirects
+        .lock()
+        .ok()
+        .and_then(|redirects| {
+            redirects
+                .get(&token)
+                .map(|redirect| redirect.verify_path.clone())
+        })
+        .unwrap_or_else(|| format!("/{}", random_token(24)));
     let query = form_urlencoded::Serializer::new(String::new())
-        .append_pair("return_to", &return_path)
+        .append_pair("state", &token)
         .finish();
     Response::builder()
         .status(StatusCode::FOUND)
-        .header(header::LOCATION, format!("/__bot_verify/start?{query}"))
+        .header(header::LOCATION, format!("{verify_path}/start?{query}"))
         .header(header::CACHE_CONTROL, "no-store")
         .body(Body::empty())
         .expect("verification redirect headers are valid")
+}
+
+pub(crate) fn verification_redirect(
+    state: &AppState,
+    remote_ip: IpAddr,
+    site: &str,
+    request: &Request<Body>,
+) -> Response<Body> {
+    let return_path = valid_return_path(
+        request
+            .uri()
+            .path_and_query()
+            .map(ToString::to_string)
+            .as_deref(),
+    );
+    redirect_response(state, remote_ip, site, return_path)
 }
 
 pub(crate) fn valid_return_path(value: Option<&str>) -> String {
@@ -192,26 +306,25 @@ pub(crate) fn valid_return_path(value: Option<&str>) -> String {
     }
 }
 
-pub(crate) fn challenge_page(
+pub(crate) async fn challenge_page(
     challenge: &Challenge,
     config: &VerificationConfig,
+    frontend_dist: &Path,
 ) -> Result<Response<Body>> {
-    let page = format!(
-        r#"<!doctype html>
-<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Checking your browser</title>
-<style>body{{font:16px system-ui,sans-serif;max-width:34rem;margin:15vh auto;padding:1rem;color:#222}}#status{{color:#555}}</style></head>
-<body><h1>Checking your browser...</h1><p id="status">Please wait while this device is verified.</p>
-<script>
-const id={id},nonce={nonce},signature={signature},difficulty={difficulty};
-function hash(value){{let hash=2166136261;for(let i=0;i<value.length;i++){{hash=Math.imul(hash^value.charCodeAt(i),16777619)>>>0;}}return hash;}}
-function hasZeroBits(value,bits){{return bits===0||(value>>>(32-bits))===0;}}
-async function run(){{for(let counter=0;;counter++){{if(hasZeroBits(hash(id+':'+nonce+':'+counter),difficulty)){{const response=await fetch('/__bot_verify/submit',{{method:'POST',headers:{{'content-type':'application/json'}},body:JSON.stringify({{challenge_id:id,counter,signature}})}});const data=await response.json().catch(()=>({{}}));if(response.ok){{location.assign(data.redirect||'/');return;}}document.getElementById('status').textContent=data.message||'Verification failed';return;}}if(counter%1000===0)await new Promise(requestAnimationFrame);}}}}
-run().catch(()=>document.getElementById('status').textContent='Verification failed');
-</script></body></html>"#,
-        id = serde_json::to_string(&challenge.id)?,
-        nonce = serde_json::to_string(&challenge.nonce)?,
-        signature = serde_json::to_string(&challenge.signature)?,
-        difficulty = config.pow_difficulty,
+    let template = tokio::fs::read_to_string(frontend_dist.join("challenge.html"))
+        .await
+        .context("failed to read challenge frontend")?;
+    let page = template.replace(
+        "__CHALLENGE_PAYLOAD__",
+        &serde_json::json!({
+            "id": challenge.id,
+            "nonce": challenge.nonce,
+            "signature": challenge.signature,
+            "difficulty": config.pow_difficulty,
+            "site": challenge.site,
+            "verify_path": challenge.verify_path,
+        })
+        .to_string(),
     );
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -226,6 +339,7 @@ pub(crate) fn create_challenge(
     site: &str,
     remote_ip: IpAddr,
     return_path: String,
+    verify_path: String,
 ) -> Challenge {
     let issued_at = unix_now();
     let mut challenge = Challenge {
@@ -234,6 +348,7 @@ pub(crate) fn create_challenge(
         site: site.to_string(),
         remote_ip,
         return_path,
+        verify_path,
         issued_at,
         expires_at: issued_at.saturating_add(verification.config.challenge_ttl_secs),
         signature: String::new(),
@@ -306,12 +421,48 @@ pub(crate) async fn handle_verification(
     site: &str,
     request: Request<Body>,
 ) -> Response<Body> {
-    let path = request.uri().path();
-    if path == "/__bot_verify/start" && request.method() == hyper::Method::GET {
+    let path = request.uri().path().to_string();
+    if path.ends_with("/start") && request.method() == hyper::Method::GET {
+        let verify_path = path.trim_end_matches("/start").to_string();
         let query = request.uri().query().unwrap_or_default();
         let params = form_urlencoded::parse(query.as_bytes()).collect::<HashMap<_, _>>();
-        let return_path = valid_return_path(params.get("return_to").map(|value| value.as_ref()));
-        let challenge = create_challenge(&state.verification, site, remote.ip(), return_path);
+        let Some(state_token) = params.get("state").map(|value| value.as_ref()) else {
+            return response_with(
+                StatusCode::FORBIDDEN,
+                "text/plain; charset=utf-8",
+                "invalid verification state",
+            );
+        };
+        let redirect = state
+            .verification
+            .redirects
+            .lock()
+            .ok()
+            .and_then(|mut redirects| {
+                let redirect = redirects.get(state_token).cloned()?;
+                if redirect.verify_path != verify_path {
+                    return None;
+                }
+                if let Some(value) = redirects.get_mut(state_token) {
+                    value.used = true;
+                }
+                Some(redirect)
+            })
+            .filter(|redirect| redirect.site == site && redirect.remote_ip == remote.ip());
+        let Some(redirect) = redirect else {
+            return redirect_response(&state, remote.ip(), site, valid_return_path(None));
+        };
+        if redirect.used || redirect.expires_at <= unix_now() {
+            return redirect_response(&state, remote.ip(), site, redirect.return_path);
+        }
+        let return_path = redirect.return_path;
+        let challenge = create_challenge(
+            &state.verification,
+            site,
+            remote.ip(),
+            return_path,
+            verify_path,
+        );
         if let Ok(mut challenges) = state.verification.challenges.lock() {
             challenges.retain(|_, challenge| challenge.expires_at > unix_now());
             if challenges.len() >= MAX_ACTIVE_CHALLENGES {
@@ -323,60 +474,18 @@ pub(crate) async fn handle_verification(
             }
             challenges.insert(challenge.id.clone(), challenge.clone());
         }
-        return challenge_page(&challenge, &state.verification.config).unwrap_or_else(|_| {
-            response_with(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "text/plain; charset=utf-8",
-                "challenge unavailable",
-            )
-        });
-    }
-
-    if path == "/__bot_verify" && request.method() == hyper::Method::GET {
-        let query = request.uri().query().unwrap_or_default();
-        let params = form_urlencoded::parse(query.as_bytes()).collect::<HashMap<_, _>>();
-        let challenge_id = params
-            .get("challenge_id")
-            .map(|value| value.as_ref())
-            .unwrap_or_default();
-        let signature = params
-            .get("signature")
-            .map(|value| value.as_ref())
-            .unwrap_or_default();
-        let challenge = state
-            .verification
-            .challenges
-            .lock()
-            .ok()
-            .and_then(|challenges| {
-                challenges
-                    .get(challenge_id)
-                    .filter(|challenge| {
-                        constant_time_eq(challenge.signature.as_bytes(), signature.as_bytes())
-                            && challenge.site == site
-                            && challenge.expires_at > unix_now()
-                            && (!state.verification.config.bind_ip
-                                || challenge.remote_ip == remote.ip())
-                    })
-                    .cloned()
+        return challenge_page(&challenge, &state.verification.config, &state.frontend_dist)
+            .await
+            .unwrap_or_else(|_| {
+                response_with(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "text/plain; charset=utf-8",
+                    "challenge unavailable",
+                )
             });
-        return match challenge {
-            Some(challenge) => challenge_page(&challenge, &state.verification.config)
-                .unwrap_or_else(|_| {
-                    response_with(
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        "text/plain; charset=utf-8",
-                        "challenge unavailable",
-                    )
-                }),
-            None => json_response(
-                StatusCode::GONE,
-                serde_json::json!({"code": 410, "message": "challenge expired"}),
-            ),
-        };
     }
 
-    if path == "/__bot_verify/submit" && request.method() == hyper::Method::POST {
+    if path.ends_with("/submit") && request.method() == hyper::Method::POST {
         let body = match axum::body::to_bytes(request.into_body(), 16 * 1024).await {
             Ok(body) => body,
             Err(_) => {
@@ -422,6 +531,7 @@ pub(crate) async fn handle_verification(
         if !constant_time_eq(challenge.signature.as_bytes(), submit.signature.as_bytes())
             || challenge.expires_at <= now
             || challenge.site != site
+            || challenge.verify_path != path.trim_end_matches("/submit")
             || (state.verification.config.bind_ip && challenge.remote_ip != remote.ip())
         {
             note_challenge_failure(&state, remote.ip(), site);

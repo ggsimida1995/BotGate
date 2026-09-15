@@ -1,0 +1,119 @@
+name: Release Bot Gate
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  linux:
+    name: Linux x64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Build backend
+        working-directory: backend
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dir="BotGate-${version}-linux-x64"
+          mkdir -p "$dir/frontend"
+          cp backend/target/release/bot-gate "$dir/"
+          cp backend/config.example.toml "$dir/config.toml"
+          cp -R frontend/dist "$dir/frontend/"
+          cp LICENSE README.md "$dir/"
+          tar -czf "${dir}.tar.gz" "$dir"
+          sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            BotGate-*.tar.gz
+            BotGate-*.tar.gz.sha256
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        run: npm ci && npm run build
+      - name: Build backend
+        working-directory: backend
+        run: cargo build --release --locked
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          dir="BotGate-${version}-macos-arm64"
+          mkdir -p "$dir/frontend"
+          cp backend/target/release/bot-gate "$dir/"
+          cp backend/config.example.toml "$dir/config.toml"
+          cp -R frontend/dist "$dir/frontend/"
+          cp LICENSE README.md "$dir/"
+          tar -czf "${dir}.tar.gz" "$dir"
+          shasum -a 256 "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            BotGate-*.tar.gz
+            BotGate-*.tar.gz.sha256
+
+  windows:
+    name: Windows x64
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Build frontend
+        working-directory: frontend
+        shell: pwsh
+        run: npm ci; npm run build
+      - name: Build backend
+        working-directory: backend
+        shell: pwsh
+        run: cargo build --release --locked
+      - name: Package
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.Substring(1)
+          $dir = "BotGate-$version-windows-x64"
+          New-Item -ItemType Directory -Force "$dir/frontend" | Out-Null
+          Copy-Item backend/target/release/bot-gate.exe "$dir/"
+          Copy-Item backend/config.example.toml "$dir/config.toml"
+          Copy-Item frontend/dist "$dir/frontend/" -Recurse
+          Copy-Item LICENSE, README.md "$dir/"
+          Compress-Archive -Path $dir -DestinationPath "$dir.zip" -Force
+          $hash = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $dir.zip" | Set-Content "$dir.zip.sha256"
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            BotGate-*.zip
+            BotGate-*.zip.sha256

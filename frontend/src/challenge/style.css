@@ -1,0 +1,23 @@
+:root { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #f4f4f5; background: #050505; }
+body { margin: 0; min-width: 320px; background: #050505; }
+.challenge-shell { min-height: 100vh; padding: clamp(34px, 8vh, 82px) clamp(20px, 7vw, 96px); box-sizing: border-box; background: #050505; }
+.challenge-panel { width: min(980px, 100%); display: grid; gap: 16px; }
+.brand-row { display: flex; align-items: center; gap: 22px; margin-bottom: 2px; }
+.brand-mark { width: 42px; height: 42px; display: grid; place-items: center; border: 2px solid #f4ce00; border-radius: 50%; color: #f4ce00; font-weight: 800; letter-spacing: -.08em; }
+.brand-name { font-size: clamp(32px, 4.2vw, 58px); line-height: 1; font-weight: 760; letter-spacing: -.04em; }
+.challenge-panel h1 { margin: 0; color: #f4f4f5; font-size: clamp(26px, 3.2vw, 40px); line-height: 1.2; }
+.lead { max-width: 900px; margin: 0; color: #aaa; font-size: clamp(15px, 1.5vw, 20px); line-height: 1.5; }
+.challenge-panel .human-check { width: min(500px, 100%); min-height: 88px; display: flex; align-items: center; gap: 14px; padding: 18px 14px; color: #eee; text-align: left; background: #303030; border: 2px solid #eee; border-radius: 4px; cursor: pointer; box-shadow: none; }
+.challenge-panel .human-check:hover { color: #fff; background: #3a3a3a; border-color: #fff; }
+.human-check .ant-checkbox { pointer-events: none; }
+.human-check .ant-checkbox-inner { width: 36px; height: 36px; border: 3px solid #aaa; border-radius: 5px; background: transparent; }
+.human-check .ant-checkbox-inner::after { display: none; }
+.human-check > span:nth-child(2) { font-size: 20px; }
+.provider { display: grid; gap: 4px; margin-left: auto; text-align: center; color: #fff; }
+.provider strong { color: #ff922e; font-size: 15px; letter-spacing: .12em; }
+.provider small { font-size: 12px; }
+.checking { width: min(500px, 100%); display: grid; gap: 10px; color: #bbb; font-size: 15px; }
+.checking .ant-progress { margin: 0; }
+.footer-note { color: #777; font-size: 13px; }
+.ant-alert { width: min(500px, 100%); }
+@media (max-width: 650px) { .challenge-shell { padding: 34px 18px; } .brand-row { gap: 14px; } .brand-mark { width: 36px; height: 36px; } .human-check { min-height: 76px; padding: 14px 10px; } .human-check .ant-checkbox-inner { width: 30px; height: 30px; border-width: 3px; } .human-check > span:nth-child(2) { font-size: 17px; } .provider strong { font-size: 12px; } .provider small { font-size: 10px; } }

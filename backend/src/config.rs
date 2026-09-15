@@ -25,9 +25,66 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) admin: AdminConfig,
     #[serde(default)]
+    pub(crate) update: UpdateConfig,
+    #[serde(default)]
+    pub(crate) license: LicenseConfig,
+    #[serde(default)]
     pub(crate) tls: TlsConfig,
     #[serde(default)]
+    pub(crate) caddy: CaddyConfig,
+    #[serde(default)]
     pub(crate) sites: Vec<SiteConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub(crate) struct UpdateConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) release_url: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct LicenseConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) public_key: String,
+    #[serde(default = "default_license_file")]
+    pub(crate) file: String,
+}
+
+impl Default for LicenseConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            public_key: String::new(),
+            file: default_license_file(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct CaddyConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_caddy_admin_api")]
+    pub(crate) admin_api: String,
+    #[serde(default = "default_caddy_server")]
+    pub(crate) server: String,
+    #[serde(default = "default_caddy_gate_upstream")]
+    pub(crate) gate_upstream: String,
+}
+
+impl Default for CaddyConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            admin_api: default_caddy_admin_api(),
+            server: default_caddy_server(),
+            gate_upstream: default_caddy_gate_upstream(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -62,15 +119,6 @@ pub(crate) struct AdminConfig {
     pub(crate) enabled: bool,
     #[serde(default = "default_admin_listen")]
     pub(crate) listen: String,
-    #[serde(default = "default_admin_password_file")]
-    pub(crate) password_file: String,
-    #[serde(
-        rename = "session_ttl",
-        alias = "session_ttl_secs",
-        default = "default_admin_session_ttl",
-        deserialize_with = "deserialize_duration_secs"
-    )]
-    pub(crate) session_ttl_secs: u64,
 }
 
 impl Default for AdminConfig {
@@ -78,8 +126,6 @@ impl Default for AdminConfig {
         Self {
             enabled: true,
             listen: default_admin_listen(),
-            password_file: default_admin_password_file(),
-            session_ttl_secs: default_admin_session_ttl(),
         }
     }
 }
@@ -298,6 +344,18 @@ pub(crate) fn default_listen() -> String {
     "127.0.0.1:8080".to_string()
 }
 
+pub(crate) fn default_caddy_admin_api() -> String {
+    "http://127.0.0.1:2019".to_string()
+}
+
+pub(crate) fn default_caddy_server() -> String {
+    "srv0".to_string()
+}
+
+pub(crate) fn default_caddy_gate_upstream() -> String {
+    "127.0.0.1:8080".to_string()
+}
+
 pub(crate) fn default_request_timeout() -> u64 {
     30
 }
@@ -346,14 +404,6 @@ pub(crate) fn default_admin_listen() -> String {
     "127.0.0.1:8081".to_string()
 }
 
-pub(crate) fn default_admin_password_file() -> String {
-    "data/admin-password.hash".to_string()
-}
-
-pub(crate) fn default_admin_session_ttl() -> u64 {
-    12 * 60 * 60
-}
-
 pub(crate) fn default_tls_listen() -> String {
     "127.0.0.1:8443".to_string()
 }
@@ -364,6 +414,10 @@ pub(crate) fn default_tls_cert_file() -> String {
 
 pub(crate) fn default_tls_key_file() -> String {
     "data/tls/key.pem".to_string()
+}
+
+pub(crate) fn default_license_file() -> String {
+    "data/license.key".to_string()
 }
 
 pub(crate) fn default_requests_per_second() -> f64 {
@@ -509,10 +563,27 @@ const MAX_CHALLENGE_TTL_SECS: u64 = 10 * 60;
 pub(crate) fn load_config(path: &Path) -> Result<Config> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("failed to read config {}", path.display()))?;
-    let config: Config = toml::from_str(&source)
+    let mut config: Config = toml::from_str(&source)
         .with_context(|| format!("failed to parse config {}", path.display()))?;
+    resolve_relative_paths(&mut config, path);
     validate_config(&config)?;
     Ok(config)
+}
+
+fn resolve_relative_paths(config: &mut Config, config_path: &Path) {
+    let base = config_path.parent().unwrap_or_else(|| Path::new("."));
+    for value in [
+        &mut config.verification.secret_file,
+        &mut config.storage.database,
+        &mut config.license.file,
+        &mut config.tls.cert_file,
+        &mut config.tls.key_file,
+    ] {
+        let path = Path::new(value.as_str());
+        if !value.is_empty() && path.is_relative() {
+            *value = base.join(path).to_string_lossy().into_owned();
+        }
+    }
 }
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
@@ -532,12 +603,6 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         .with_context(|| format!("invalid admin.listen: {}", config.admin.listen))?;
     if config.admin.enabled && !admin_listen.ip().is_loopback() {
         bail!("admin.listen must use a loopback address");
-    }
-    if config.admin.session_ttl_secs == 0 || config.admin.session_ttl_secs > 7 * 24 * 60 * 60 {
-        bail!("admin.session_ttl must be between 1 second and 7 days");
-    }
-    if config.admin.password_file.trim().is_empty() {
-        bail!("admin.password_file must not be empty");
     }
     validate_tls(config)?;
     if config.verification.cookie_name.is_empty()
@@ -587,6 +652,14 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
     }
     if config.security.ban.duration_secs == 0 {
         bail!("security.ban.duration must be greater than zero");
+    }
+    if config.license.enabled {
+        if config.license.public_key.trim().is_empty() {
+            bail!("license.public_key is required when license.enabled = true");
+        }
+        if config.license.file.trim().is_empty() {
+            bail!("license.file must not be empty when license.enabled = true");
+        }
     }
     for ip in &config.security.whitelist.ips {
         ip.parse::<IpAddr>()

@@ -41,6 +41,7 @@ pub(crate) struct BanEntry {
 #[derive(Debug, Clone)]
 pub(crate) struct WhitelistRule {
     pub(crate) network: IpNet,
+    #[allow(dead_code)]
     pub(crate) skip_challenge: bool,
     pub(crate) skip_rate_limit: bool,
 }

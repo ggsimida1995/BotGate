@@ -50,6 +50,7 @@ duration = "10m"
 [security.whitelist]
 ips = ["127.0.0.1"]
 networks = []
+# Retained for policy compatibility; signed browser verification is still required.
 skip_challenge = true
 skip_rate_limit = false
 
@@ -63,8 +64,27 @@ persist_request_logs = true
 [admin]
 enabled = true
 listen = "127.0.0.1:9090"
-password_file = "data/admin-password.hash"
-session_ttl = "8h"
+
+# GitHub Release link shown in the management dashboard.
+# Keep disabled until a public release URL is configured.
+[update]
+enabled = false
+release_url = ""
+
+# Optional signed one-year license verification.
+# The public key is base64/base64url-encoded Ed25519 public key bytes.
+[license]
+enabled = false
+public_key = ""
+file = "data/license.key"
+
+[caddy]
+# Enable this when Caddy owns the public domain and should switch its route
+# between Bot Gate and the configured upstream from the admin UI.
+enabled = false
+admin_api = "http://127.0.0.1:2019"
+server = "srv0"
+gate_upstream = "127.0.0.1:8080"
 
 [upstream]
 # Phase 1 defaults to loopback-only upstreams to reduce SSRF risk.
@@ -73,15 +93,3 @@ allow_private_networks = false
 # Domain upstreams are resolved per request and accepted only when they resolve
 # to an allowed loopback/private address.
 allow_dns = false
-
-[[sites]]
-host = "project-a.test"
-target = "http://127.0.0.1:9001"
-policy = "normal"
-enabled = true
-
-[[sites]]
-host = "project-b.test"
-target = "http://127.0.0.1:9002"
-policy = "strict"
-enabled = true

@@ -12,6 +12,7 @@ Bot Gate is designed to block simple local-network scanners and reduce accidenta
 - Accidental public exposure of the admin UI
 - Basic Host-header and hop-by-hop-header abuse
 - Configured-upstream SSRF
+- Frontend assets are served only from the built `frontend/dist` output; the admin listener remains loopback-only.
 
 ## Explicit limitations
 
@@ -40,4 +41,4 @@ Phase 3 adds in-memory token buckets, IP/CIDR whitelist matching, risk scores an
 
 ## Sensitive logging
 
-Request logs do not store passwords, Authorization values, complete Cookies or complete tokens. The current request path is recorded without its query string; future fields must preserve the same redaction rule.
+Request logs do not store Authorization values, complete Cookies or complete tokens. The current request path is recorded without its query string; future fields must preserve the same redaction rule.

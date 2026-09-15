@@ -2,7 +2,7 @@
 
 ## Scope
 
-Bot Gate is a single-binary local reverse proxy. It sits in front of one or more local HTTP applications and progressively adds browser verification, request policy enforcement, persistence and a loopback-only management plane.
+Bot Gate is a local reverse proxy with a Rust backend and a separately built React frontend. It sits in front of one or more local HTTP applications and progressively adds browser verification, request policy enforcement, persistence and a loopback-only management plane. The release process produces one Rust executable plus the `frontend/dist` assets it serves. Backend source, configuration, database and build output live under `backend/`.
 
 ## Runtime flow
 
@@ -10,12 +10,13 @@ Bot Gate is a single-binary local reverse proxy. It sits in front of one or more
 Public HTTP/TLS listener
   -> request limits and Host validation
   -> ban / whitelist decision
-  -> rate limit
-  -> signed-cookie verification
-  -> scanner risk decision
+  -> rate limit and scanner risk rejection
+  -> signed-cookie verification / Browser Challenge
   -> reverse proxy
   -> asynchronous request/security logging
 ```
+
+When verification is enabled, a request without a valid site-bound HMAC cookie is stopped at the verification step. It is redirected to the Challenge for HTML navigation or returned as `403` for API/non-GET requests; it never reaches an upstream. Whitelist entries can change rate/risk policy only and cannot bypass this gate.
 
 The admin listener is separate and defaults to `127.0.0.1`.
 
@@ -24,7 +25,7 @@ The admin listener is separate and defaults to `127.0.0.1`.
 - The public listener treats LAN clients as untrusted.
 - The client-provided User-Agent, Referer, Origin and forwarded headers are untrusted.
 - The upstream target is configuration data, never request data.
-- The admin listener is a local trust boundary protected by Argon2id passwords and signed sessions.
+- The admin listener is a local trust boundary: it is loopback-only and intentionally has no password login.
 
 ## Component plan
 
@@ -42,7 +43,7 @@ The admin listener is separate and defaults to `127.0.0.1`.
 | `storage` | SQLite schema and batched writes |
 | `admin` | Loopback-only dashboard and management API |
 
-The source layout mirrors these boundaries: `src/config.rs`, `src/security.rs`, `src/proxy.rs`, `src/storage.rs`, and `src/admin.rs` keep configuration, enforcement, transport, persistence, and management code out of the request entry point.
+The source layout mirrors these boundaries: `backend/src/config.rs`, `backend/src/security.rs`, `backend/src/http.rs`, `backend/src/proxy.rs`, `backend/src/verification.rs`, `backend/src/storage.rs`, and `backend/src/admin.rs` keep configuration, enforcement, HTTP helpers, transport, challenge, persistence, and management code out of the request entry point. `backend/src/main.rs` focuses on wiring, request orchestration and lifecycle. The React + Ant Design management and challenge pages live under `frontend/src/` and build into `frontend/dist/`.
 
 ## Global verification
 
@@ -60,4 +61,4 @@ In the current phase, the per-site flow is implemented locally: an unverified HT
 
 ## Persistence strategy
 
-SQLite is used for configuration, bans, sessions, security events and retained logs. High-frequency request logging is queued in a bounded in-memory channel and flushed in batches by one writer thread. Request handling never performs a synchronous SQLite write. Ordinary request logs may be dropped when the queue is full; security and ban events use a separate blocking queue.
+SQLite is used for configuration, bans, security events and retained logs. High-frequency request logging is queued in a bounded in-memory channel and flushed in batches by one writer thread. Request handling never performs a synchronous SQLite write. Ordinary request logs may be dropped when the queue is full; security and ban events use a separate blocking queue.

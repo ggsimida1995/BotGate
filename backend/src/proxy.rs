@@ -5,8 +5,9 @@ use hyper::{
     header::{self, HeaderName, HeaderValue},
     Request, StatusCode, Uri,
 };
+use hyper_util::rt::TokioIo;
 use std::net::{IpAddr, SocketAddr};
-use url::{Host, Url};
+use url::Url;
 
 use crate::{normalize_host, resolve_upstream_ip, AppState, SiteConfig};
 
@@ -37,16 +38,9 @@ fn is_hop_by_hop(name: &HeaderName) -> bool {
     )
 }
 
-fn upstream_authority(target: &Url) -> Result<String> {
-    let host = match target.host().context("upstream host is required")? {
-        Host::Domain(host) => host.to_string(),
-        Host::Ipv4(host) => host.to_string(),
-        Host::Ipv6(host) => format!("[{host}]"),
-    };
-    Ok(match target.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host,
-    })
+fn should_forward_request_header(name: &HeaderName, is_upgrade: bool) -> bool {
+    !is_hop_by_hop(name)
+        || (is_upgrade && (*name == header::CONNECTION || *name == header::UPGRADE))
 }
 
 fn sanitized_cookie(value: &HeaderValue, gate_cookie_name: &str) -> Option<HeaderValue> {
@@ -109,7 +103,7 @@ fn build_upstream_uri(target: &Url, request_uri: &Uri, connect_ip: IpAddr) -> Re
 
 pub(crate) async fn proxy_request(
     state: &AppState,
-    request: Request<Body>,
+    mut request: Request<Body>,
     site: &SiteConfig,
     remote: SocketAddr,
     scheme: &str,
@@ -121,13 +115,16 @@ pub(crate) async fn proxy_request(
         .headers()
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
+        .unwrap_or_default()
+        .to_string();
+    let is_upgrade = request.headers().contains_key(header::UPGRADE);
+    let downstream_upgrade = is_upgrade.then(|| hyper::upgrade::on(&mut request));
     let mut builder = Request::builder().method(request.method()).uri(uri);
     let headers = builder
         .headers_mut()
         .context("failed to build proxy headers")?;
     for (name, value) in request.headers() {
-        if *name != header::HOST && !is_hop_by_hop(name) {
+        if *name != header::HOST && should_forward_request_header(name, is_upgrade) {
             if *name == header::COOKIE {
                 if let Some(value) = sanitized_cookie(value, &state.verification.config.cookie_name)
                 {
@@ -138,8 +135,10 @@ pub(crate) async fn proxy_request(
             }
         }
     }
-    let upstream_host = upstream_authority(&target)?;
-    headers.insert(header::HOST, HeaderValue::from_str(&upstream_host)?);
+    // The request Host has already been normalized and matched to a configured
+    // site before this function is called. Preserve it so upstream dev servers
+    // (for example Vite's allowedHosts) still see the public hostname.
+    headers.insert(header::HOST, HeaderValue::from_str(&original_host)?);
     headers.insert(
         HeaderName::from_static("x-real-ip"),
         HeaderValue::from_str(&remote.ip().to_string())?,
@@ -154,23 +153,57 @@ pub(crate) async fn proxy_request(
     );
     headers.insert(
         HeaderName::from_static("x-forwarded-host"),
-        HeaderValue::from_str(original_host)?,
+        HeaderValue::from_str(&original_host)?,
     );
 
     let request = builder.body(request.into_body())?;
-    let response = tokio::time::timeout(state.request_timeout, state.client.request(request))
+    let mut response = tokio::time::timeout(state.request_timeout, state.client.request(request))
         .await
         .context("upstream request timed out")??;
+    let upstream_upgrade = (is_upgrade && response.status() == StatusCode::SWITCHING_PROTOCOLS)
+        .then(|| hyper::upgrade::on(&mut response));
+    if let (Some(downstream_upgrade), Some(upstream_upgrade)) =
+        (downstream_upgrade, upstream_upgrade)
+    {
+        tokio::spawn(async move {
+            let (Ok(downstream), Ok(upstream)) = tokio::join!(downstream_upgrade, upstream_upgrade)
+            else {
+                return;
+            };
+            let mut downstream = TokioIo::new(downstream);
+            let mut upstream = TokioIo::new(upstream);
+            let _ = tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await;
+        });
+    }
     Ok(strip_response_headers(response))
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forwards_upgrade_headers_only_for_upgraded_requests() {
+        assert!(!should_forward_request_header(&header::UPGRADE, false));
+        assert!(!should_forward_request_header(&header::CONNECTION, false));
+        assert!(should_forward_request_header(&header::UPGRADE, true));
+        assert!(should_forward_request_header(&header::CONNECTION, true));
+        assert!(should_forward_request_header(&header::ACCEPT, false));
+    }
+}
+
 fn strip_response_headers(response: hyper::Response<Incoming>) -> Response<Body> {
+    let preserve_upgrade_headers = response.status() == StatusCode::SWITCHING_PROTOCOLS;
     let (parts, body) = response.into_parts();
     let mut response = Response::from_parts(parts, Body::new(body));
     let remove = response
         .headers()
         .keys()
-        .filter(|name| is_hop_by_hop(name))
+        .filter(|name| {
+            is_hop_by_hop(name)
+                && !(preserve_upgrade_headers
+                    && (*name == header::CONNECTION || *name == header::UPGRADE))
+        })
         .cloned()
         .collect::<Vec<_>>();
     for name in remove {

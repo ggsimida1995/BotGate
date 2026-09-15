@@ -1,0 +1,443 @@
+import React, { useEffect, useState } from 'react';
+import { createRoot } from 'react-dom/client';
+import {
+  Alert,
+  App,
+  Button,
+  Card,
+  Col,
+  ConfigProvider,
+  Form,
+  Input,
+  InputNumber,
+  Layout,
+  Modal,
+  Row,
+  Space,
+  Statistic,
+  Table,
+  Tag,
+  Tabs,
+  Typography,
+} from 'antd';
+import {
+  ApiOutlined,
+  CheckCircleFilled,
+  DeleteOutlined,
+  GlobalOutlined,
+  LockOutlined,
+  PlusOutlined,
+  ReloadOutlined,
+  SafetyCertificateOutlined,
+  SyncOutlined,
+} from '@ant-design/icons';
+import 'antd/dist/reset.css';
+import './style.css';
+import LogsPanel from './logs.jsx';
+
+const { Header, Content } = Layout;
+const { Text, Title } = Typography;
+
+const metricCards = [
+  { key: 'today_requests', label: '今日请求', icon: <ApiOutlined />, tone: 'blue', mode: 'requests' },
+  { key: 'today_verified', label: '已验证请求', icon: <CheckCircleFilled />, tone: 'green', mode: 'requests' },
+  { key: 'today_blocked', label: '已拦截请求', icon: <LockOutlined />, tone: 'orange', mode: 'requests' },
+  { key: 'today_challenge_failures', label: '验证失败', icon: <SafetyCertificateOutlined />, tone: 'purple', mode: 'interceptions' },
+  { key: 'active_bans', label: '活跃封禁', icon: <DeleteOutlined />, tone: 'red', mode: 'bans' },
+  { key: 'active_challenges', label: '进行中验证', icon: <GlobalOutlined />, tone: 'cyan', mode: 'challenges' },
+];
+
+function versionParts(value) {
+  return String(value || '0.0.0')
+    .replace(/^v/i, '')
+    .split('.')
+    .map((part) => Number.parseInt(part, 10) || 0);
+}
+
+function isNewerVersion(remote, current) {
+  const left = versionParts(remote);
+  const right = versionParts(current);
+  for (let index = 0; index < 3; index += 1) {
+    if (left[index] !== right[index]) return left[index] > right[index];
+  }
+  return false;
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { 'content-type': 'application/json', ...(options.headers || {}) },
+    ...options,
+  });
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.message || `请求失败 (${response.status})`);
+  return body;
+}
+
+function AdminConsole() {
+  const { message } = App.useApp();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [dashboard, setDashboard] = useState({});
+  const [sites, setSites] = useState([]);
+  const [bans, setBans] = useState([]);
+  const [whitelist, setWhitelist] = useState([]);
+  const [caddyEnabled, setCaddyEnabled] = useState(false);
+  const [lastUpdated, setLastUpdated] = useState(null);
+  const [systemInfo, setSystemInfo] = useState({ version: '0.1.0', update_enabled: false });
+  const [logModal, setLogModal] = useState(null);
+  const [addModal, setAddModal] = useState(null);
+  const [licenseModal, setLicenseModal] = useState(false);
+  const [siteForm] = Form.useForm();
+  const [banForm] = Form.useForm();
+  const [whitelistForm] = Form.useForm();
+  const [licenseForm] = Form.useForm();
+  const licenseStatus = systemInfo.license?.status || 'disabled';
+  const licenseLabel = licenseStatus === 'active' ? '有效' : licenseStatus === 'disabled' ? '未启用' : '未激活';
+
+  async function refresh() {
+    setLoading(true);
+    setError('');
+    try {
+      const [stats, siteData, banData, whitelistData, systemData] = await Promise.all([
+        api('/api/dashboard'),
+        api('/api/sites'),
+        api('/api/bans'),
+        api('/api/whitelist'),
+        api('/api/system'),
+      ]);
+      setDashboard(stats);
+      setSites(siteData.sites || []);
+      setCaddyEnabled(Boolean(siteData.caddy_enabled));
+      setBans(banData.bans || []);
+      setWhitelist(whitelistData.whitelist || []);
+      setSystemInfo(systemData);
+      setLastUpdated(new Date());
+    } catch (cause) {
+      setError(cause.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function checkForUpdates() {
+    if (!systemInfo.update_enabled || !systemInfo.release_url) {
+      message.info('尚未配置 GitHub Release 更新地址');
+      return;
+    }
+    try {
+      const response = await fetch(systemInfo.release_url, { headers: { accept: 'application/json' } });
+      if (!response.ok) throw new Error(`更新检查失败 (${response.status})`);
+      const release = await response.json();
+      const remoteVersion = release.version || release.tag_name;
+      if (!remoteVersion) throw new Error('更新清单缺少版本号');
+      if (isNewerVersion(remoteVersion, systemInfo.version)) {
+        message.success(`发现新版本 ${remoteVersion}，即将打开下载页面`);
+        window.open(release.html_url || release.url || systemInfo.release_url, '_blank', 'noopener,noreferrer');
+      } else {
+        message.success(`当前已是最新版本 v${systemInfo.version}`);
+      }
+    } catch (cause) {
+      message.error(cause.message);
+    }
+  }
+
+  async function activateLicense(values) {
+    try {
+      const result = await api('/api/license/activate', {
+        method: 'POST',
+        body: JSON.stringify({ key: values.key }),
+      });
+      setSystemInfo((current) => ({ ...current, license: result.license }));
+      licenseForm.resetFields();
+      setLicenseModal(false);
+      message.success('许可证激活成功');
+    } catch (cause) {
+      message.error(cause.message);
+    }
+  }
+
+  useEffect(() => { refresh(); }, []);
+
+  function openAddModal(type) {
+    if (type === 'site') siteForm.resetFields();
+    if (type === 'ban') banForm.resetFields();
+    if (type === 'whitelist') whitelistForm.resetFields();
+    setAddModal(type);
+  }
+
+  function openMetric(card) {
+    const filters = {};
+    if (card.key === 'today_verified') filters.verified = true;
+    if (card.key === 'today_blocked') filters.blocked = true;
+    if (card.key === 'today_challenge_failures') filters.event_type = 'challenge_failure';
+    setLogModal({ mode: card.mode, filters });
+  }
+
+  async function reloadConfig() {
+    try {
+      await api('/api/reload', { method: 'POST' });
+      message.success('配置已重新加载');
+      await refresh();
+    } catch (cause) {
+      message.error(cause.message);
+    }
+  }
+
+  async function saveSite(values) {
+    try {
+      const existing = sites.find((site) => site.host === values.host.trim().toLowerCase());
+      await api('/api/sites', {
+        method: 'POST',
+        body: JSON.stringify({ ...values, enabled: existing ? existing.enabled : true }),
+      });
+      siteForm.resetFields();
+      message.success('站点已保存');
+      await refresh();
+      return true;
+    } catch (cause) {
+      message.error(cause.message);
+      return false;
+    }
+  }
+
+  async function saveBan(values) {
+    try {
+      await api('/api/bans', { method: 'POST', body: JSON.stringify(values) });
+      banForm.resetFields(['ip', 'reason']);
+      message.success('封禁已保存');
+      await refresh();
+      return true;
+    } catch (cause) {
+      message.error(cause.message);
+      return false;
+    }
+  }
+
+  async function saveWhitelist(values) {
+    try {
+      await api('/api/whitelist', {
+        method: 'POST',
+        body: JSON.stringify({ ...values, skip_challenge: false, skip_rate_limit: false }),
+      });
+      whitelistForm.resetFields();
+      message.success('白名单已保存');
+      await refresh();
+      return true;
+    } catch (cause) {
+      message.error(cause.message);
+      return false;
+    }
+  }
+
+  async function deleteSite(host) {
+    try {
+      await api('/api/sites/delete', { method: 'POST', body: JSON.stringify({ host }) });
+      message.success('站点已删除');
+      await refresh();
+    } catch (cause) { message.error(cause.message); }
+  }
+
+  async function toggleSite(row) {
+    try {
+      await api('/api/sites/toggle', {
+        method: 'POST',
+        body: JSON.stringify({ host: row.host, enabled: !row.enabled }),
+      });
+      message.success(row.enabled ? '已暂停保护，域名将直连项目' : '已恢复保护，域名重新经过 Bot Gate');
+      await refresh();
+    } catch (cause) { message.error(cause.message); }
+  }
+
+  async function deleteBan(ip) {
+    try {
+      await api('/api/bans/delete', { method: 'POST', body: JSON.stringify({ ip }) });
+      message.success('封禁已删除');
+      await refresh();
+    } catch (cause) { message.error(cause.message); }
+  }
+
+  async function deleteWhitelist(id) {
+    try {
+      await api('/api/whitelist/delete', { method: 'POST', body: JSON.stringify({ id }) });
+      message.success('白名单已删除');
+      await refresh();
+    } catch (cause) { message.error(cause.message); }
+  }
+
+  const siteColumns = [
+    { title: 'Host', dataIndex: 'host', key: 'host' },
+    { title: 'Upstream', dataIndex: 'target', key: 'target' },
+    { title: '策略', dataIndex: 'policy', key: 'policy', render: (value) => <Tag>{value}</Tag> },
+    { title: '保护状态', dataIndex: 'enabled', key: 'enabled', render: (value) => <Tag color={value ? 'success' : 'default'}>{value ? '保护中' : '已暂停，直连'}</Tag> },
+    { title: '操作', key: 'action', render: (_, row) => <Space size="small"><Button type="link" disabled={!caddyEnabled} title={caddyEnabled ? '' : '请在 backend/config.toml 启用 caddy'} onClick={() => toggleSite(row)}>{row.enabled ? '暂停保护' : '恢复保护'}</Button><Button danger type="link" onClick={() => deleteSite(row.host)}>删除</Button></Space> },
+  ];
+  const banColumns = [
+    { title: 'IP', dataIndex: 'ip', key: 'ip' },
+    { title: '原因', dataIndex: 'reason', key: 'reason' },
+    { title: '来源', dataIndex: 'source', key: 'source' },
+    { title: '到期时间', dataIndex: 'expires_at', key: 'expires_at', render: (value) => new Date(value * 1000).toLocaleString() },
+    { title: '操作', key: 'action', render: (_, row) => <Button danger type="link" onClick={() => deleteBan(row.ip)}>解除</Button> },
+  ];
+  const whitelistColumns = [
+    { title: '类型', dataIndex: 'kind', key: 'kind' },
+    { title: '值', dataIndex: 'value', key: 'value' },
+    { title: '备注', dataIndex: 'note', key: 'note', render: (value) => value || '-' },
+    { title: '操作', key: 'action', render: (_, row) => <Button danger type="link" onClick={() => deleteWhitelist(row.id)}>删除</Button> },
+  ];
+  return (
+    <Layout className="admin-layout">
+      <Header className="admin-header">
+        <div className="brand-block">
+          <div className="brand-mark"><SafetyCertificateOutlined /></div>
+          <div>
+            <Text className="header-kicker">LOCAL ACCESS GATE</Text>
+            <Title level={3}>Bot Gate</Title>
+          </div>
+        </div>
+        <div className="header-actions">
+          <Tag icon={<CheckCircleFilled />} color="success" className="status-tag">本机运行</Tag>
+          <Tag color="blue">v{systemInfo.version}</Tag>
+          <Tag color={licenseStatus === 'active' ? 'success' : 'default'}>
+            许可证：{licenseLabel}
+          </Tag>
+          <Button onClick={() => setLicenseModal(true)}>激活许可证</Button>
+          <Button onClick={checkForUpdates}>检查更新</Button>
+          <Button icon={<ReloadOutlined />} onClick={reloadConfig}>重新加载配置</Button>
+          <Button type="primary" icon={<SyncOutlined spin={loading} />} onClick={refresh}>刷新数据</Button>
+        </div>
+      </Header>
+      <Content className="admin-content">
+        <section className="welcome-row">
+          <div>
+            <Text className="eyebrow">SECURITY OVERVIEW</Text>
+            <Title className="page-title">运行概览</Title>
+            <Text className="page-subtitle">保护本机站点，验证通过后才允许请求进入业务后端。</Text>
+          </div>
+          <div className="welcome-meta">
+            <Text>监听模式</Text><strong>Loopback only</strong>
+            <Text>数据更新</Text><strong>{lastUpdated ? lastUpdated.toLocaleTimeString() : '加载中'}</strong>
+          </div>
+        </section>
+        <Alert className="notice-alert" type="info" showIcon message="管理台仅监听本机回环地址，无密码登录。配置文件变更后请点击“重新加载配置”。" />
+        {error && <Alert className="error-alert" type="error" showIcon message={error} />}
+
+        <Row gutter={[12, 12]} className="stats-grid">
+          {metricCards.map((card) => (
+            <Col xs={12} sm={8} lg={4} key={card.key}>
+              <Card className={`metric-card metric-${card.tone} metric-clickable`} onClick={() => openMetric(card)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') openMetric(card); }}>
+                <div className="metric-icon">{card.icon}</div>
+                <Statistic title={card.label} value={dashboard[card.key] ?? 0} />
+                <Text className="metric-caption">{card.key.startsWith('today_') ? '今日累计' : '当前状态'}</Text>
+              </Card>
+            </Col>
+          ))}
+        </Row>
+
+        <Text className="metric-hint">点击上方统计卡片查看对应明细</Text>
+
+        <Tabs
+          className="log-tabs management-tabs"
+            items={[
+              {
+                key: 'sites',
+                label: <span><GlobalOutlined /> 站点路由</span>,
+                children: (
+                  <div className="management-panel">
+                    <div className="management-panel-head">
+                      <SectionTitle icon={<GlobalOutlined />} title="站点路由" description={`${sites.length} 个站点正在管理 · ${caddyEnabled ? 'Caddy 接管已启用' : 'Caddy 接管未启用'}`} />
+                      <Button type="primary" icon={<PlusOutlined />} onClick={() => openAddModal('site')}>添加站点</Button>
+                    </div>
+                    <Table rowKey="host" loading={loading} columns={siteColumns} dataSource={sites} pagination={{ pageSize: 8 }} />
+                  </div>
+                ),
+              },
+              {
+                key: 'bans',
+                label: <span><LockOutlined /> 临时封禁</span>,
+                children: (
+                  <div className="management-panel">
+                    <div className="management-panel-head">
+                      <SectionTitle icon={<LockOutlined />} title="临时封禁" description="控制异常来源的访问权限" />
+                      <Button type="primary" danger icon={<PlusOutlined />} onClick={() => openAddModal('ban')}>添加封禁</Button>
+                    </div>
+                    <Table rowKey="ip" loading={loading} columns={banColumns} dataSource={bans} pagination={{ pageSize: 8 }} />
+                  </div>
+                ),
+              },
+              {
+                key: 'whitelist',
+                label: <span><SafetyCertificateOutlined /> 白名单</span>,
+                children: (
+                  <div className="management-panel">
+                    <div className="management-panel-head">
+                      <SectionTitle icon={<SafetyCertificateOutlined />} title="白名单" description="仅影响策略，不跳过浏览器验证" />
+                      <Button type="primary" icon={<PlusOutlined />} onClick={() => openAddModal('whitelist')}>添加白名单</Button>
+                    </div>
+                    <Table rowKey="id" loading={loading} columns={whitelistColumns} dataSource={whitelist} pagination={{ pageSize: 8 }} />
+                  </div>
+                ),
+              },
+            ]}
+        />
+        <Modal
+          open={Boolean(addModal)}
+          centered
+          title={addModal === 'site' ? '添加站点' : addModal === 'ban' ? '添加临时封禁' : '添加白名单'}
+          footer={null}
+          destroyOnClose
+          onCancel={() => setAddModal(null)}
+        >
+          {addModal === 'site' && (
+            <Form form={siteForm} layout="vertical" onFinish={async (values) => { if (await saveSite(values)) setAddModal(null); }}>
+              <Form.Item name="host" label="Host" rules={[{ required: true, message: '请输入 Host' }]}><Input placeholder="project.local" /></Form.Item>
+              <Form.Item name="target" label="Upstream" rules={[{ required: true, message: '请输入 upstream' }]}><Input placeholder="http://127.0.0.1:9001" /></Form.Item>
+              <Form.Item name="policy" label="策略" initialValue="normal"><Input placeholder="策略" /></Form.Item>
+              <Button type="primary" htmlType="submit" block icon={<GlobalOutlined />}>保存站点</Button>
+            </Form>
+          )}
+          {addModal === 'ban' && (
+            <Form form={banForm} layout="vertical" onFinish={async (values) => { if (await saveBan(values)) setAddModal(null); }}>
+              <Form.Item name="ip" label="IP 地址" rules={[{ required: true, message: '请输入 IP 地址' }]}><Input placeholder="192.168.1.20" /></Form.Item>
+              <Form.Item name="reason" label="原因" rules={[{ required: true, message: '请输入封禁原因' }]}><Input placeholder="扫描行为" /></Form.Item>
+              <Form.Item name="duration_secs" label="持续秒数" initialValue={600} rules={[{ required: true, message: '请输入持续秒数' }]}><InputNumber min={1} className="full-width" placeholder="600" /></Form.Item>
+              <Button type="primary" danger htmlType="submit" block>保存封禁</Button>
+            </Form>
+          )}
+          {addModal === 'whitelist' && (
+            <Form form={whitelistForm} layout="vertical" onFinish={async (values) => { if (await saveWhitelist(values)) setAddModal(null); }}>
+              <Form.Item name="value" label="地址或网段" rules={[{ required: true, message: '请输入地址或网段' }]}><Input placeholder="127.0.0.1 或 192.168.1.0/24" /></Form.Item>
+              <Form.Item name="note" label="备注"><Input placeholder="备注（可选）" /></Form.Item>
+              <Button type="primary" htmlType="submit" block icon={<SafetyCertificateOutlined />}>保存白名单</Button>
+            </Form>
+          )}
+        </Modal>
+        <Modal
+          open={licenseModal}
+          centered
+          title="激活许可证"
+          okButtonProps={{ style: { display: 'none' } }}
+          cancelText="关闭"
+          onCancel={() => setLicenseModal(false)}
+        >
+          <Form form={licenseForm} layout="vertical" onFinish={activateLicense}>
+            <Form.Item name="key" label="许可证密钥" rules={[{ required: true, message: '请输入许可证密钥' }]}>
+              <Input.TextArea rows={5} placeholder="BG1.payload.signature" />
+            </Form.Item>
+            <Button type="primary" htmlType="submit" block>验证并激活</Button>
+          </Form>
+        </Modal>
+      </Content>
+      <LogsPanel api={api} message={message} open={Boolean(logModal)} mode={logModal?.mode} filters={logModal?.filters} onChanged={refresh} onClose={() => setLogModal(null)} />
+    </Layout>
+  );
+}
+
+function SectionTitle({ icon, title, description }) {
+  return <div className="section-title"><span className="section-icon">{icon}</span><span><strong>{title}</strong><small>{description}</small></span></div>;
+}
+
+createRoot(document.getElementById('root')).render(
+  <ConfigProvider theme={{ token: { colorPrimary: '#149b73', colorInfo: '#149b73', borderRadius: 12, fontFamily: 'Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif' }, components: { Card: { headerFontSize: 16 }, Button: { controlHeight: 38 } } }}>
+    <App><AdminConsole /></App>
+  </ConfigProvider>,
+);

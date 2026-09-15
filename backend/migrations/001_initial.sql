@@ -62,25 +62,13 @@ CREATE TABLE IF NOT EXISTS security_events (
     details_redacted TEXT
 );
 
-CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY,
-    token_hash TEXT NOT NULL UNIQUE,
-    created_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    last_seen_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS challenges (
-    id TEXT PRIMARY KEY,
-    site_id TEXT NOT NULL,
-    nonce_hash TEXT NOT NULL,
-    client_ip_hash TEXT,
-    issued_at INTEGER NOT NULL,
-    expires_at INTEGER NOT NULL,
-    attempts INTEGER NOT NULL DEFAULT 0,
-    consumed_at INTEGER
-);
-
 CREATE INDEX IF NOT EXISTS idx_request_logs_timestamp ON request_logs(timestamp);
+CREATE INDEX IF NOT EXISTS idx_request_logs_host_timestamp ON request_logs(host, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_request_logs_ip_timestamp ON request_logs(remote_ip, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_request_logs_blocked_timestamp ON request_logs(blocked, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_request_logs_status_timestamp ON request_logs(status, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_security_events_timestamp ON security_events(timestamp);
+CREATE INDEX IF NOT EXISTS idx_security_events_host_timestamp ON security_events(host, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_security_events_ip_timestamp ON security_events(remote_ip, timestamp DESC);
+CREATE INDEX IF NOT EXISTS idx_security_events_type_timestamp ON security_events(event_type, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_bans_expires_at ON bans(expires_at);

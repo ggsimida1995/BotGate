@@ -7,8 +7,8 @@ use std::{
 };
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, Connection, OptionalExtension};
-use serde::{de, Deserialize, Deserializer};
+use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
+use serde::{de, Deserialize, Deserializer, Serialize};
 
 const REQUEST_QUEUE: usize = 4096;
 const LOG_BATCH_SIZE: usize = 100;
@@ -64,6 +64,23 @@ pub struct RequestLog {
     pub risk_score: u32,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RequestLogRecord {
+    pub id: i64,
+    pub timestamp: u64,
+    pub remote_ip: String,
+    pub host: String,
+    pub method: String,
+    pub path: String,
+    pub status: u16,
+    pub verified: bool,
+    pub blocked: bool,
+    pub reason: Option<String>,
+    pub user_agent: Option<String>,
+    pub latency_ms: u64,
+    pub risk_score: u32,
+}
+
 #[derive(Debug, Clone)]
 pub struct SecurityEvent {
     pub timestamp: u64,
@@ -74,6 +91,44 @@ pub struct SecurityEvent {
     pub risk_score: u32,
     pub action: String,
     pub details_redacted: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SecurityEventRecord {
+    pub id: i64,
+    pub timestamp: u64,
+    pub remote_ip: String,
+    pub host: String,
+    pub path: String,
+    pub event_type: String,
+    pub risk_score: u32,
+    pub action: String,
+    pub details_redacted: Option<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct LogFilter {
+    pub search: Option<String>,
+    pub host: Option<String>,
+    pub remote_ip: Option<String>,
+    pub path: Option<String>,
+    pub status: Option<u16>,
+    pub blocked: Option<bool>,
+    pub verified: Option<bool>,
+    pub event_type: Option<String>,
+    pub from: Option<u64>,
+    pub to: Option<u64>,
+    pub page: u32,
+    pub page_size: u32,
+}
+
+impl LogFilter {
+    pub fn normalized_page(&self) -> (u32, u32, u32) {
+        let page = self.page.max(1);
+        let page_size = self.page_size.clamp(10, 100);
+        let offset = page.saturating_sub(1).saturating_mul(page_size);
+        (page, page_size, offset)
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -260,6 +315,158 @@ impl Storage {
         })
     }
 
+    pub fn request_logs(&self, filter: &LogFilter) -> Result<(Vec<RequestLogRecord>, u64)> {
+        let connection = self.management_connection()?;
+        let (where_sql, values) = request_log_filter_sql(filter);
+        let total_sql = format!("SELECT count(*) FROM request_logs{where_sql}");
+        let total: i64 =
+            connection.query_row(&total_sql, params_from_iter(values.iter()), |row| {
+                row.get(0)
+            })?;
+        let (_, page_size, offset) = filter.normalized_page();
+        let filter_count = values.len();
+        let mut query_values = values;
+        query_values.push(Value::Integer(i64::from(page_size)));
+        query_values.push(Value::Integer(i64::from(offset)));
+        let query = format!(
+            "SELECT id, timestamp, remote_ip, host, method, path, status, verified, blocked, reason, user_agent, latency_ms, risk_score FROM request_logs{where_sql} ORDER BY timestamp DESC, id DESC LIMIT ?{} OFFSET ?{}",
+            filter_count + 1,
+            filter_count + 2
+        );
+        let mut statement = connection.prepare(&query)?;
+        let rows = statement
+            .query_map(params_from_iter(query_values.iter()), |row| {
+                Ok(RequestLogRecord {
+                    id: row.get(0)?,
+                    timestamp: row.get::<_, i64>(1)? as u64,
+                    remote_ip: row.get(2)?,
+                    host: row.get(3)?,
+                    method: row.get(4)?,
+                    path: row.get(5)?,
+                    status: row.get::<_, i64>(6)? as u16,
+                    verified: row.get(7)?,
+                    blocked: row.get(8)?,
+                    reason: row.get(9)?,
+                    user_agent: row.get(10)?,
+                    latency_ms: row.get::<_, i64>(11)? as u64,
+                    risk_score: row.get::<_, i64>(12)? as u32,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load request logs")?;
+        Ok((rows, total as u64))
+    }
+
+    pub fn security_events(&self, filter: &LogFilter) -> Result<(Vec<SecurityEventRecord>, u64)> {
+        let connection = self.management_connection()?;
+        let (where_sql, values) = security_event_filter_sql(filter);
+        let total_sql = format!("SELECT count(*) FROM security_events{where_sql}");
+        let total: i64 =
+            connection.query_row(&total_sql, params_from_iter(values.iter()), |row| {
+                row.get(0)
+            })?;
+        let (_, page_size, offset) = filter.normalized_page();
+        let filter_count = values.len();
+        let mut query_values = values;
+        query_values.push(Value::Integer(i64::from(page_size)));
+        query_values.push(Value::Integer(i64::from(offset)));
+        let query = format!(
+            "SELECT id, timestamp, remote_ip, host, path, event_type, risk_score, action, details_redacted FROM security_events{where_sql} ORDER BY timestamp DESC, id DESC LIMIT ?{} OFFSET ?{}",
+            filter_count + 1,
+            filter_count + 2
+        );
+        let mut statement = connection.prepare(&query)?;
+        let rows = statement
+            .query_map(params_from_iter(query_values.iter()), |row| {
+                Ok(SecurityEventRecord {
+                    id: row.get(0)?,
+                    timestamp: row.get::<_, i64>(1)? as u64,
+                    remote_ip: row.get(2)?,
+                    host: row.get(3)?,
+                    path: row.get(4)?,
+                    event_type: row.get(5)?,
+                    risk_score: row.get::<_, i64>(6)? as u32,
+                    action: row.get(7)?,
+                    details_redacted: row.get(8)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("failed to load security events")?;
+        Ok((rows, total as u64))
+    }
+
+    pub fn clear_request_logs(&self, filter: &LogFilter) -> Result<u64> {
+        let connection = self.management_connection()?;
+        let (where_sql, values) = request_log_filter_sql(filter);
+        let deleted = connection.execute(
+            &format!("DELETE FROM request_logs{where_sql}"),
+            params_from_iter(values.iter()),
+        )?;
+        Ok(deleted as u64)
+    }
+
+    pub fn clear_security_events(&self, filter: &LogFilter) -> Result<u64> {
+        let connection = self.management_connection()?;
+        let (where_sql, values) = security_event_filter_sql(filter);
+        let deleted = connection.execute(
+            &format!("DELETE FROM security_events{where_sql}"),
+            params_from_iter(values.iter()),
+        )?;
+        Ok(deleted as u64)
+    }
+
+    pub fn request_log(&self, id: i64) -> Result<Option<RequestLogRecord>> {
+        let connection = self.management_connection()?;
+        connection
+            .query_row(
+                "SELECT id, timestamp, remote_ip, host, method, path, status, verified, blocked, reason, user_agent, latency_ms, risk_score FROM request_logs WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(RequestLogRecord {
+                        id: row.get(0)?,
+                        timestamp: row.get::<_, i64>(1)? as u64,
+                        remote_ip: row.get(2)?,
+                        host: row.get(3)?,
+                        method: row.get(4)?,
+                        path: row.get(5)?,
+                        status: row.get::<_, i64>(6)? as u16,
+                        verified: row.get(7)?,
+                        blocked: row.get(8)?,
+                        reason: row.get(9)?,
+                        user_agent: row.get(10)?,
+                        latency_ms: row.get::<_, i64>(11)? as u64,
+                        risk_score: row.get::<_, i64>(12)? as u32,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load request log")
+    }
+
+    pub fn security_event(&self, id: i64) -> Result<Option<SecurityEventRecord>> {
+        let connection = self.management_connection()?;
+        connection
+            .query_row(
+                "SELECT id, timestamp, remote_ip, host, path, event_type, risk_score, action, details_redacted FROM security_events WHERE id = ?1",
+                params![id],
+                |row| {
+                    Ok(SecurityEventRecord {
+                        id: row.get(0)?,
+                        timestamp: row.get::<_, i64>(1)? as u64,
+                        remote_ip: row.get(2)?,
+                        host: row.get(3)?,
+                        path: row.get(4)?,
+                        event_type: row.get(5)?,
+                        risk_score: row.get::<_, i64>(6)? as u32,
+                        action: row.get(7)?,
+                        details_redacted: row.get(8)?,
+                    })
+                },
+            )
+            .optional()
+            .context("failed to load security event")
+    }
+
     pub fn management_enabled(&self) -> bool {
         self.database.is_some()
     }
@@ -278,14 +485,14 @@ impl Storage {
                 |row| row.get(0),
             )
             .optional()?;
+        let now = unix_now() as i64;
+        for site in sites {
+            transaction.execute(
+                "INSERT OR IGNORE INTO sites (host, target, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+                params![site.host, site.target, site.policy, site.enabled, now],
+            )?;
+        }
         if initialized.is_none() {
-            let now = unix_now() as i64;
-            for site in sites {
-                transaction.execute(
-                    "INSERT OR IGNORE INTO sites (host, target, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                    params![site.host, site.target, site.policy, site.enabled, now],
-                )?;
-            }
             for entry in whitelist {
                 transaction.execute(
                     "INSERT INTO whitelist (kind, value, skip_challenge, skip_rate_limit, note, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -462,6 +669,132 @@ impl Storage {
 fn scalar_count(connection: &Connection, sql: &str, value: u64) -> Result<u64> {
     let count: i64 = connection.query_row(sql, params![value as i64], |row| row.get(0))?;
     u64::try_from(count).context("SQLite count is negative")
+}
+
+fn request_log_filter_sql(filter: &LogFilter) -> (String, Vec<Value>) {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    add_search_filter(
+        &mut clauses,
+        &mut values,
+        filter.search.as_deref(),
+        &[
+            "host",
+            "remote_ip",
+            "path",
+            "method",
+            "reason",
+            "user_agent",
+        ],
+    );
+    add_text_filter(&mut clauses, &mut values, "host", filter.host.as_deref());
+    add_text_filter(
+        &mut clauses,
+        &mut values,
+        "remote_ip",
+        filter.remote_ip.as_deref(),
+    );
+    add_text_filter(&mut clauses, &mut values, "path", filter.path.as_deref());
+    if let Some(status) = filter.status {
+        clauses.push("status = ?".to_string());
+        values.push(Value::Integer(i64::from(status)));
+    }
+    if let Some(blocked) = filter.blocked {
+        clauses.push("blocked = ?".to_string());
+        values.push(Value::Integer(i64::from(blocked)));
+    }
+    if let Some(verified) = filter.verified {
+        clauses.push("verified = ?".to_string());
+        values.push(Value::Integer(i64::from(verified)));
+    }
+    add_time_filters(&mut clauses, &mut values, filter);
+    where_clause(clauses, values)
+}
+
+fn security_event_filter_sql(filter: &LogFilter) -> (String, Vec<Value>) {
+    let mut clauses = Vec::new();
+    let mut values = Vec::new();
+    add_search_filter(
+        &mut clauses,
+        &mut values,
+        filter.search.as_deref(),
+        &[
+            "host",
+            "remote_ip",
+            "path",
+            "event_type",
+            "action",
+            "details_redacted",
+        ],
+    );
+    add_text_filter(&mut clauses, &mut values, "host", filter.host.as_deref());
+    add_text_filter(
+        &mut clauses,
+        &mut values,
+        "remote_ip",
+        filter.remote_ip.as_deref(),
+    );
+    add_text_filter(&mut clauses, &mut values, "path", filter.path.as_deref());
+    add_text_filter(
+        &mut clauses,
+        &mut values,
+        "event_type",
+        filter.event_type.as_deref(),
+    );
+    add_time_filters(&mut clauses, &mut values, filter);
+    where_clause(clauses, values)
+}
+
+fn add_time_filters(clauses: &mut Vec<String>, values: &mut Vec<Value>, filter: &LogFilter) {
+    if let Some(from) = filter.from {
+        clauses.push("timestamp >= ?".to_string());
+        values.push(Value::Integer(from as i64));
+    }
+    if let Some(to) = filter.to {
+        clauses.push("timestamp <= ?".to_string());
+        values.push(Value::Integer(to as i64));
+    }
+}
+
+fn add_text_filter(
+    clauses: &mut Vec<String>,
+    values: &mut Vec<Value>,
+    column: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value.filter(|value| !value.trim().is_empty()) {
+        clauses.push(format!("{column} LIKE ?"));
+        values.push(Value::Text(format!("%{}%", value.trim())));
+    }
+}
+
+fn add_search_filter(
+    clauses: &mut Vec<String>,
+    values: &mut Vec<Value>,
+    value: Option<&str>,
+    columns: &[&str],
+) {
+    let Some(value) = value.filter(|value| !value.trim().is_empty()) else {
+        return;
+    };
+    let pattern = format!("%{}%", value.trim());
+    clauses.push(format!(
+        "({})",
+        columns
+            .iter()
+            .map(|column| format!("{column} LIKE ?"))
+            .collect::<Vec<_>>()
+            .join(" OR ")
+    ));
+    values.extend(columns.iter().map(|_| Value::Text(pattern.clone())));
+}
+
+fn where_clause(clauses: Vec<String>, values: Vec<Value>) -> (String, Vec<Value>) {
+    if clauses.is_empty() {
+        (String::new(), values)
+    } else {
+        (format!(" WHERE {}", clauses.join(" AND ")), values)
+    }
 }
 
 fn initialize(connection: &Connection) -> Result<()> {
@@ -726,6 +1059,18 @@ mod tests {
         storage.bootstrap_management(&[site.clone()], &[]).unwrap();
         assert_eq!(storage.managed_sites().unwrap().len(), 1);
         storage
+            .bootstrap_management(
+                &[ManagedSite {
+                    host: "project-b.test".to_string(),
+                    target: "http://127.0.0.1:9002".to_string(),
+                    policy: "normal".to_string(),
+                    enabled: true,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(storage.managed_sites().unwrap().len(), 2);
+        storage
             .upsert_site(&ManagedSite {
                 enabled: false,
                 ..site
@@ -743,6 +1088,81 @@ mod tests {
         storage.replace_whitelist(&entry).unwrap();
         let entry = storage.managed_whitelist().unwrap().pop().unwrap();
         assert!(storage.delete_whitelist(entry.id).unwrap());
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn log_queries_filter_and_paginate() {
+        let path =
+            std::env::temp_dir().join(format!("bot-gate-log-query-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let connection = Connection::open(&path).unwrap();
+        initialize(&connection).unwrap();
+        connection
+            .execute(
+                "INSERT INTO request_logs (timestamp, remote_ip, host, method, path, status, verified, blocked, reason, user_agent, latency_ms, risk_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![100_i64, "127.0.0.1", "cool.com", "GET", "/admin", 403_i64, false, true, "verification_required", "curl", 2_i64, 4_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO request_logs (timestamp, remote_ip, host, method, path, status, verified, blocked, reason, user_agent, latency_ms, risk_score) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                params![101_i64, "127.0.0.1", "other.test", "GET", "/", 200_i64, true, false, Option::<String>::None, "browser", 3_i64, 0_i64],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO security_events (timestamp, remote_ip, host, path, event_type, risk_score, action, details_redacted) VALUES (?,?,?,?,?,?,?,?)",
+                params![102_i64, "127.0.0.1", "cool.com", "/api/user", "rate_limit", 50_i64, "request_rejected", "burst exceeded"],
+            )
+            .unwrap();
+        drop(connection);
+        let storage = Storage {
+            request_tx: None,
+            security_tx: None,
+            persist_request_logs: false,
+            database: Some(path.to_string_lossy().into_owned()),
+        };
+        let (items, total) = storage
+            .request_logs(&LogFilter {
+                search: Some("/admin".to_string()),
+                blocked: Some(true),
+                page: 1,
+                page_size: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(total, 1);
+        assert_eq!(items[0].path, "/admin");
+        let (events, event_total) = storage
+            .security_events(&LogFilter {
+                search: Some("request_rejected".to_string()),
+                event_type: Some("rate_limit".to_string()),
+                page: 1,
+                page_size: 10,
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(event_total, 1);
+        assert_eq!(events[0].action, "request_rejected");
+        assert_eq!(
+            storage
+                .clear_request_logs(&LogFilter {
+                    from: Some(101),
+                    ..Default::default()
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            storage
+                .clear_security_events(&LogFilter {
+                    from: Some(102),
+                    ..Default::default()
+                })
+                .unwrap(),
+            1
+        );
         let _ = std::fs::remove_file(path);
     }
 }
