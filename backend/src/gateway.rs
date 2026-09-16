@@ -4,14 +4,11 @@ use anyhow::{Context, Result};
 use axum::{extract::Extension, Router};
 use axum_server::{tls_rustls::RustlsConfig, Handle as TlsHandle};
 use serde::Serialize;
-use tokio::{
-    net::TcpListener,
-    sync::{oneshot, Mutex},
-};
+use tokio::sync::{oneshot, Mutex};
 use tower_http::{limit::RequestBodyLimitLayer, services::ServeDir};
 use tracing::error;
 
-use crate::{handle_request, AppState, RequestScheme};
+use crate::{bind_listener, handle_request, AppState, RequestScheme};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GatewayStatus {
@@ -24,6 +21,8 @@ struct Runtime {
     running: bool,
     http_shutdown: Option<oneshot::Sender<()>>,
     tls_handle: Option<TlsHandle>,
+    http_address: Option<String>,
+    https_address: Option<String>,
 }
 
 pub(crate) struct GatewayController {
@@ -48,6 +47,8 @@ impl GatewayController {
                 running: false,
                 http_shutdown: None,
                 tls_handle: None,
+                http_address: None,
+                https_address: None,
             }),
             state,
             http_listen,
@@ -58,10 +59,17 @@ impl GatewayController {
     }
 
     pub(crate) async fn status(&self) -> GatewayStatus {
+        let runtime = self.runtime.lock().await;
         GatewayStatus {
-            running: self.runtime.lock().await.running,
-            http_listen: self.http_listen.clone(),
-            https_listen: self.https_listen.clone(),
+            running: runtime.running,
+            http_listen: runtime
+                .http_address
+                .clone()
+                .unwrap_or_else(|| self.http_listen.clone()),
+            https_listen: runtime
+                .https_address
+                .clone()
+                .or_else(|| self.https_listen.clone()),
         }
     }
 
@@ -70,17 +78,18 @@ impl GatewayController {
         if runtime.running {
             return Ok(GatewayStatus {
                 running: true,
-                http_listen: self.http_listen.clone(),
-                https_listen: self.https_listen.clone(),
+                http_listen: runtime
+                    .http_address
+                    .clone()
+                    .unwrap_or_else(|| self.http_listen.clone()),
+                https_listen: runtime
+                    .https_address
+                    .clone()
+                    .or_else(|| self.https_listen.clone()),
             });
         }
 
-        let listener = TcpListener::bind(&self.http_listen).await.with_context(|| {
-            format!(
-                "gateway address {} is unavailable; stop the process using this port or change [server].listen",
-                self.http_listen
-            )
-        })?;
+        let (listener, http_address) = bind_listener(&self.http_listen, "gateway").await?;
         let app = public_app(self.state.clone(), self.body_limit, "http");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -97,7 +106,7 @@ impl GatewayController {
             }
         });
 
-        let tls_handle = match (&self.tls_config, &self.https_listen) {
+        let (tls_handle, https_address) = match (&self.tls_config, &self.https_listen) {
             (Some(tls_config), Some(tls_listen)) => {
                 let tls_addr: SocketAddr = tls_listen
                     .parse()
@@ -115,18 +124,20 @@ impl GatewayController {
                         error!(error = %error, "gateway TLS server failed");
                     }
                 });
-                Some(handle)
+                (Some(handle), Some(tls_addr.to_string()))
             }
-            _ => None,
+            _ => (None, None),
         };
 
         runtime.running = true;
         runtime.http_shutdown = Some(shutdown_tx);
         runtime.tls_handle = tls_handle;
+        runtime.http_address = Some(http_address.to_string());
+        runtime.https_address = https_address;
         Ok(GatewayStatus {
             running: true,
-            http_listen: self.http_listen.clone(),
-            https_listen: self.https_listen.clone(),
+            http_listen: http_address.to_string(),
+            https_listen: runtime.https_address.clone(),
         })
     }
 
@@ -139,6 +150,8 @@ impl GatewayController {
             handle.graceful_shutdown(Some(Duration::from_secs(30)));
         }
         runtime.running = false;
+        runtime.http_address = None;
+        runtime.https_address = None;
         GatewayStatus {
             running: false,
             http_listen: self.http_listen.clone(),

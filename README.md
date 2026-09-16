@@ -18,7 +18,7 @@ cargo run --release
 
 编译后也可以在 `backend/` 中直接运行 `target/release/bot-gate`；Windows 使用 `target\release\bot-gate.exe`。如果从仓库根目录直接运行二进制，使用 `backend/target/release/bot-gate`，程序会自动找到 `backend/config.toml`。以后修改 React 前端后，重新执行 `cd frontend && npm run build` 即可。
 
-启动后默认只监听管理端口 `127.0.0.1:9090`，不会立即占用网关端口 `127.0.0.1:8080`。打开管理台后，点击“启动网关”才会启动反向代理；许可证启用时必须先激活有效许可证。点击“停止网关”会释放网关端口，管理台仍保持可用。
+启动后默认尝试监听管理端口 `127.0.0.1:9090`，不会立即占用网关端口 `127.0.0.1:8080`。如果端口被占用，程序会自动选择空闲端口，并在管理台的系统状态中显示实际地址。打开管理台后，点击“启动网关”才会启动反向代理；许可证启用时必须先激活有效许可证。点击“停止网关”会释放网关端口，管理台仍保持可用。
 
 首次创建配置时，在 `backend/` 目录执行 `cp config.example.toml config.toml`；Windows PowerShell 使用 `Copy-Item config.example.toml config.toml`。
 

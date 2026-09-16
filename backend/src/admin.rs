@@ -220,7 +220,27 @@ pub(crate) async fn admin_gateway_start(
         );
     }
     match state.gateway.start().await {
-        Ok(gateway) => json_response(StatusCode::OK, serde_json::json!({"gateway": gateway})),
+        Ok(gateway) => {
+            if state.public_state.caddy.enabled {
+                let mut caddy = state.public_state.caddy.clone();
+                caddy.gate_upstream = gateway.http_listen.clone();
+                if let Ok(sites) = state.storage.managed_sites() {
+                    for site in sites.into_iter().filter(|site| site.enabled) {
+                        if let Err(error) = crate::caddy::set_site_protection(
+                            &caddy,
+                            &site.host,
+                            &site.target,
+                            true,
+                        )
+                        .await
+                        {
+                            error!(error = %error, host = %site.host, "failed to update Caddy route after gateway start");
+                        }
+                    }
+                }
+            }
+            json_response(StatusCode::OK, serde_json::json!({"gateway": gateway}))
+        }
         Err(error) => {
             error!(error = %error, "failed to start gateway");
             json_response(
@@ -650,13 +670,13 @@ pub(crate) async fn admin_toggle_site(
     if site.enabled == input.enabled {
         return json_response(StatusCode::OK, serde_json::json!({"ok":true}));
     }
-    if let Err(error) = crate::caddy::set_site_protection(
-        &state.public_state.caddy,
-        &site.host,
-        &site.target,
-        input.enabled,
-    )
-    .await
+    let gateway = state.gateway.status().await;
+    let mut caddy = state.public_state.caddy.clone();
+    if gateway.running {
+        caddy.gate_upstream = gateway.http_listen;
+    }
+    if let Err(error) =
+        crate::caddy::set_site_protection(&caddy, &site.host, &site.target, input.enabled).await
     {
         error!(error = %error, host = %site.host, "failed to switch Caddy site route");
         return json_response(

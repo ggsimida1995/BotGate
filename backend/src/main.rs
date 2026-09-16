@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     env,
+    io::ErrorKind,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, Mutex, RwLock},
@@ -66,6 +67,32 @@ use verification::{
 
 const DEFAULT_CONFIG: &str = "config.toml";
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+pub(crate) async fn bind_listener(listen: &str, label: &str) -> Result<(TcpListener, SocketAddr)> {
+    let configured: SocketAddr = listen
+        .parse()
+        .with_context(|| format!("invalid {label} listener address: {listen}"))?;
+    match TcpListener::bind(configured).await {
+        Ok(listener) => {
+            let address = listener.local_addr()?;
+            Ok((listener, address))
+        }
+        Err(error) if error.kind() == ErrorKind::AddrInUse && configured.port() != 0 => {
+            let fallback = SocketAddr::new(configured.ip(), 0);
+            let listener = TcpListener::bind(fallback).await.with_context(|| {
+                format!(
+                    "failed to bind {label} listener {listen}, and automatic port selection also failed"
+                )
+            })?;
+            let address = listener.local_addr()?;
+            warn!(configured = %configured, actual = %address, "configured listener is occupied; using an automatic port");
+            Ok((listener, address))
+        }
+        Err(error) => {
+            Err(error).with_context(|| format!("failed to bind {label} listener {listen}"))
+        }
+    }
+}
 
 fn default_config_path() -> PathBuf {
     let mut candidates = Vec::new();
@@ -781,10 +808,8 @@ async fn run() -> Result<()> {
         None
     };
     if let Some(admin_state) = admin_state {
-        let admin_listener = TcpListener::bind(&config.admin.listen)
-            .await
-            .with_context(|| format!("failed to bind admin listener {}", config.admin.listen))?;
-        let admin_url = format!("http://{}", config.admin.listen);
+        let (admin_listener, admin_address) = bind_listener(&config.admin.listen, "admin").await?;
+        let admin_url = format!("http://{admin_address}");
         let (tray_handle, mut tray_events, tray_enabled) = match tray::start(admin_url.clone()) {
             Ok((handle, events)) => (Some(handle), events, true),
             Err(error) => {

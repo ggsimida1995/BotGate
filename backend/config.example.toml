@@ -4,6 +4,7 @@
 
 [server]
 # The gateway listener is started manually from the management dashboard.
+# If this port is occupied, Bot Gate automatically selects a free port.
 # Use 0.0.0.0 only when the gate must be reachable from the LAN.
 listen = "127.0.0.1:8080"
 request_timeout_secs = 30
@@ -62,6 +63,7 @@ log_retention = "7d"
 persist_request_logs = true
 
 # This listener starts with the process and remains available while the gateway is stopped.
+# If this port is occupied, Bot Gate automatically selects a free loopback port.
 # Keep it on a loopback address.
 [admin]
 enabled = true

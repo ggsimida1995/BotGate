@@ -15,7 +15,7 @@ git push origin v0.1.0
 ```
 
 工作流会生成 Linux x64 压缩包、macOS arm64 安装磁盘映像（`.dmg`）和 Windows x64 安装程序（`.exe`），并附加到 GitHub Release。
-版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.4` 时使用 `v0.2.4`。
+版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.5` 时使用 `v0.2.5`。
 
 macOS 安装包内含完整的 `.app`，其中包含 Rust 后端、`frontend/dist` 和默认 `config.toml`。将应用拖到“应用程序”后即可启动。首次启动会把配置复制到 `~/Library/Application Support/BotGate/`，数据库和签名密钥也会写入该用户目录，不需要修改应用包权限。
 
@@ -33,7 +33,7 @@ BotGate-<version>-windows-x64/
   frontend/dist/challenge.html
 ```
 
-程序会按可执行文件所在目录查找 `config.toml` 和 `frontend/dist`，因此不依赖当前命令行目录。Windows 版本不会弹出控制台窗口，而是在系统托盘驻留；右键托盘图标可以打开 `http://127.0.0.1:9090` 管理台或退出程序。配置错误、端口占用等启动失败会弹出错误对话框。
+程序会按可执行文件所在目录查找 `config.toml` 和 `frontend/dist`，因此不依赖当前命令行目录。Windows 版本不会弹出控制台窗口，而是在系统托盘驻留；右键托盘图标会打开实际管理地址，默认是 `http://127.0.0.1:9090`，若端口被占用则自动使用空闲端口。配置错误等启动失败会弹出错误对话框。
 
 首次运行会在包目录附近创建 `data/secret.key` 和 SQLite 数据库。升级时保留 `config.toml` 与 `data/`，只替换可执行文件和 `frontend/` 目录。
 
