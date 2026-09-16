@@ -12,9 +12,10 @@ import {
   Select,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
-import { FileSearchOutlined, WarningOutlined } from '@ant-design/icons';
+import { EyeOutlined, FileSearchOutlined, WarningOutlined } from '@ant-design/icons';
 import dayjs from 'dayjs';
 
 const { Text } = Typography;
@@ -186,7 +187,7 @@ export default function LogsPanel({ api, message, open, mode, filters, onChanged
     { title: '验证', dataIndex: 'verified', key: 'verified', width: 75, render: (value) => value ? <Tag color="success">通过</Tag> : <Tag>未验证</Tag> },
     { title: '风险', dataIndex: 'risk_score', key: 'risk_score', width: 65 },
     { title: '耗时', dataIndex: 'latency_ms', key: 'latency_ms', width: 70, render: (value) => `${value} ms` },
-    { title: '详情', key: 'detail', width: 65, render: (_, row) => <Button type="link" onClick={() => setSelectedRequest(row)}>查看</Button> },
+    { title: '详情', key: 'detail', width: 65, render: (_, row) => <Tooltip title="查看详情"><Button type="link" aria-label="查看请求详情" icon={<EyeOutlined />} onClick={() => setSelectedRequest(row)} /></Tooltip> },
   ];
   const interceptionColumns = [
     { title: '时间', dataIndex: 'timestamp', key: 'timestamp', width: 170, render: formatTime },
@@ -196,7 +197,7 @@ export default function LogsPanel({ api, message, open, mode, filters, onChanged
     { title: '路径', dataIndex: 'path', key: 'path', ellipsis: true },
     { title: '动作', dataIndex: 'action', key: 'action', width: 160 },
     { title: '风险', dataIndex: 'risk_score', key: 'risk_score', width: 65 },
-    { title: '详情', key: 'detail', width: 65, render: (_, row) => <Button type="link" onClick={() => setSelectedInterception(row)}>查看</Button> },
+    { title: '详情', key: 'detail', width: 65, render: (_, row) => <Tooltip title="查看详情"><Button type="link" aria-label="查看拦截详情" icon={<EyeOutlined />} onClick={() => setSelectedInterception(row)} /></Tooltip> },
   ];
   const banColumns = [
     { title: 'IP', dataIndex: 'ip', key: 'ip' },

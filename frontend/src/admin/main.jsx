@@ -18,18 +18,24 @@ import {
   Table,
   Tag,
   Tabs,
+  Tooltip,
   Typography,
 } from 'antd';
 import {
   ApiOutlined,
   CheckCircleFilled,
+  CloudOutlined,
+  CloudDownloadOutlined,
   DeleteOutlined,
   GlobalOutlined,
+  KeyOutlined,
   LockOutlined,
+  PauseCircleOutlined,
   PlusOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
   SyncOutlined,
+  UnlockOutlined,
 } from '@ant-design/icons';
 import 'antd/dist/reset.css';
 import './style.css';
@@ -83,7 +89,8 @@ function AdminConsole() {
   const [whitelist, setWhitelist] = useState([]);
   const [caddyEnabled, setCaddyEnabled] = useState(false);
   const [lastUpdated, setLastUpdated] = useState(null);
-  const [systemInfo, setSystemInfo] = useState({ version: '0.1.0', update_enabled: false });
+  const [systemInfo, setSystemInfo] = useState({ version: '0.1.0', update_enabled: false, gateway: { running: false } });
+  const [gatewayStatus, setGatewayStatus] = useState({ running: false });
   const [logModal, setLogModal] = useState(null);
   const [addModal, setAddModal] = useState(null);
   const [licenseModal, setLicenseModal] = useState(false);
@@ -111,6 +118,7 @@ function AdminConsole() {
       setBans(banData.bans || []);
       setWhitelist(whitelistData.whitelist || []);
       setSystemInfo(systemData);
+      setGatewayStatus(systemData.gateway || { running: false });
       setLastUpdated(new Date());
     } catch (cause) {
       setError(cause.message);
@@ -151,6 +159,17 @@ function AdminConsole() {
       licenseForm.resetFields();
       setLicenseModal(false);
       message.success('许可证激活成功');
+    } catch (cause) {
+      message.error(cause.message);
+    }
+  }
+
+  async function toggleGateway() {
+    const action = gatewayStatus.running ? 'stop' : 'start';
+    try {
+      const result = await api(`/api/gateway/${action}`, { method: 'POST' });
+      setGatewayStatus(result.gateway);
+      message.success(action === 'start' ? '网关已启动' : '网关已停止');
     } catch (cause) {
       message.error(cause.message);
     }
@@ -269,41 +288,48 @@ function AdminConsole() {
     { title: 'Upstream', dataIndex: 'target', key: 'target' },
     { title: '策略', dataIndex: 'policy', key: 'policy', render: (value) => <Tag>{value}</Tag> },
     { title: '保护状态', dataIndex: 'enabled', key: 'enabled', render: (value) => <Tag color={value ? 'success' : 'default'}>{value ? '保护中' : '已暂停，直连'}</Tag> },
-    { title: '操作', key: 'action', render: (_, row) => <Space size="small"><Button type="link" disabled={!caddyEnabled} title={caddyEnabled ? '' : '请在 backend/config.toml 启用 caddy'} onClick={() => toggleSite(row)}>{row.enabled ? '暂停保护' : '恢复保护'}</Button><Button danger type="link" onClick={() => deleteSite(row.host)}>删除</Button></Space> },
+    { title: '操作', key: 'action', render: (_, row) => <Space size="small">
+      <Tooltip title={caddyEnabled ? (row.enabled ? '暂停保护' : '恢复保护') : '请在 backend/config.toml 启用 caddy'}>
+        <Button type="link" disabled={!caddyEnabled} aria-label={row.enabled ? '暂停保护' : '恢复保护'} icon={row.enabled ? <PauseCircleOutlined /> : <UnlockOutlined />} onClick={() => toggleSite(row)} />
+      </Tooltip>
+      <Tooltip title="删除站点"><Button danger type="link" aria-label="删除站点" icon={<DeleteOutlined />} onClick={() => deleteSite(row.host)} /></Tooltip>
+    </Space> },
   ];
   const banColumns = [
     { title: 'IP', dataIndex: 'ip', key: 'ip' },
     { title: '原因', dataIndex: 'reason', key: 'reason' },
     { title: '来源', dataIndex: 'source', key: 'source' },
     { title: '到期时间', dataIndex: 'expires_at', key: 'expires_at', render: (value) => new Date(value * 1000).toLocaleString() },
-    { title: '操作', key: 'action', render: (_, row) => <Button danger type="link" onClick={() => deleteBan(row.ip)}>解除</Button> },
+    { title: '操作', key: 'action', render: (_, row) => <Tooltip title="解除封禁"><Button danger type="link" aria-label="解除封禁" icon={<UnlockOutlined />} onClick={() => deleteBan(row.ip)} /></Tooltip> },
   ];
   const whitelistColumns = [
     { title: '类型', dataIndex: 'kind', key: 'kind' },
     { title: '值', dataIndex: 'value', key: 'value' },
     { title: '备注', dataIndex: 'note', key: 'note', render: (value) => value || '-' },
-    { title: '操作', key: 'action', render: (_, row) => <Button danger type="link" onClick={() => deleteWhitelist(row.id)}>删除</Button> },
+    { title: '操作', key: 'action', render: (_, row) => <Tooltip title="删除白名单"><Button danger type="link" aria-label="删除白名单" icon={<DeleteOutlined />} onClick={() => deleteWhitelist(row.id)} /></Tooltip> },
   ];
   return (
     <Layout className="admin-layout">
       <Header className="admin-header">
         <div className="brand-block">
-          <div className="brand-mark"><SafetyCertificateOutlined /></div>
+          <div className="brand-mark"><CloudOutlined /></div>
           <div>
-            <Text className="header-kicker">LOCAL ACCESS GATE</Text>
             <Title level={3}>Bot Gate</Title>
           </div>
         </div>
         <div className="header-actions">
-          <Tag icon={<CheckCircleFilled />} color="success" className="status-tag">本机运行</Tag>
-          <Tag color="blue">v{systemInfo.version}</Tag>
-          <Tag color={licenseStatus === 'active' ? 'success' : 'default'}>
-            许可证：{licenseLabel}
-          </Tag>
-          <Button onClick={() => setLicenseModal(true)}>激活许可证</Button>
-          <Button onClick={checkForUpdates}>检查更新</Button>
-          <Button icon={<ReloadOutlined />} onClick={reloadConfig}>重新加载配置</Button>
-          <Button type="primary" icon={<SyncOutlined spin={loading} />} onClick={refresh}>刷新数据</Button>
+          <Button
+            type={gatewayStatus.running ? 'default' : 'primary'}
+            danger={gatewayStatus.running}
+            disabled={!gatewayStatus.running && licenseStatus !== 'active' && licenseStatus !== 'disabled'}
+            onClick={toggleGateway}
+          >
+            {gatewayStatus.running ? '停止网关' : '启动网关'}
+          </Button>
+          <Tooltip title="激活许可证"><Button aria-label="激活许可证" icon={<KeyOutlined />} onClick={() => setLicenseModal(true)} /></Tooltip>
+          <Tooltip title="检查更新"><Button aria-label="检查更新" icon={<CloudDownloadOutlined />} onClick={checkForUpdates} /></Tooltip>
+          <Tooltip title="重新加载配置"><Button aria-label="重新加载配置" icon={<ReloadOutlined />} onClick={reloadConfig} /></Tooltip>
+          <Tooltip title="刷新数据"><Button type="primary" aria-label="刷新数据" icon={<SyncOutlined spin={loading} />} onClick={refresh} /></Tooltip>
         </div>
       </Header>
       <Content className="admin-content">
@@ -313,17 +339,13 @@ function AdminConsole() {
             <Title className="page-title">运行概览</Title>
             <Text className="page-subtitle">保护本机站点，验证通过后才允许请求进入业务后端。</Text>
           </div>
-          <div className="welcome-meta">
-            <Text>监听模式</Text><strong>Loopback only</strong>
-            <Text>数据更新</Text><strong>{lastUpdated ? lastUpdated.toLocaleTimeString() : '加载中'}</strong>
-          </div>
         </section>
-        <Alert className="notice-alert" type="info" showIcon message="管理台仅监听本机回环地址，无密码登录。配置文件变更后请点击“重新加载配置”。" />
+        <Alert className="notice-alert" type="info" showIcon message="管理台默认启动且仅监听本机回环地址，无密码登录。许可证有效后，可在此手动启动或停止网关。" />
         {error && <Alert className="error-alert" type="error" showIcon message={error} />}
 
         <Row gutter={[12, 12]} className="stats-grid">
           {metricCards.map((card) => (
-            <Col xs={12} sm={8} lg={4} key={card.key}>
+            <Col xs={24} sm={12} lg={8} key={card.key}>
               <Card className={`metric-card metric-${card.tone} metric-clickable`} onClick={() => openMetric(card)} role="button" tabIndex={0} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') openMetric(card); }}>
                 <div className="metric-icon">{card.icon}</div>
                 <Statistic title={card.label} value={dashboard[card.key] ?? 0} />
@@ -427,6 +449,16 @@ function AdminConsole() {
           </Form>
         </Modal>
       </Content>
+      <footer className="admin-footer">
+        <span className="footer-powered">Powered by <strong>Bot Gate</strong></span>
+        <div className="footer-status">
+          <Tag icon={<CheckCircleFilled />} color="success">本机运行</Tag>
+          <Tag>监听 · Loopback only</Tag>
+          <Tag color={licenseStatus === 'active' ? 'success' : 'default'}>许可证 · {licenseLabel}</Tag>
+          <Tag color={gatewayStatus.running ? 'success' : 'default'}>网关 · {gatewayStatus.running ? '运行中' : '已停止'}</Tag>
+        </div>
+        <span className="footer-version">v{systemInfo.version} · 更新于 {lastUpdated ? lastUpdated.toLocaleTimeString() : '加载中'}</span>
+      </footer>
       <LogsPanel api={api} message={message} open={Boolean(logModal)} mode={logModal?.mode} filters={logModal?.filters} onChanged={refresh} onClose={() => setLogModal(null)} />
     </Layout>
   );

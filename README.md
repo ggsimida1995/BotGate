@@ -18,6 +18,8 @@ cargo run --release
 
 编译后也可以在 `backend/` 中直接运行 `target/release/bot-gate`；Windows 使用 `target\release\bot-gate.exe`。如果从仓库根目录直接运行二进制，使用 `backend/target/release/bot-gate`，程序会自动找到 `backend/config.toml`。以后修改 React 前端后，重新执行 `cd frontend && npm run build` 即可。
 
+启动后默认只监听管理端口 `127.0.0.1:9090`，不会立即占用网关端口 `127.0.0.1:8080`。打开管理台后，点击“启动网关”才会启动反向代理；许可证启用时必须先激活有效许可证。点击“停止网关”会释放网关端口，管理台仍保持可用。
+
 首次创建配置时，在 `backend/` 目录执行 `cp config.example.toml config.toml`；Windows PowerShell 使用 `Copy-Item config.example.toml config.toml`。
 
 ## Project layout
@@ -52,11 +54,11 @@ Add the configured hosts to the local hosts file:
 
 The hosts file is `/etc/hosts` on macOS/Linux and `C:\Windows\System32\drivers\etc\hosts` on Windows. `.test` is recommended for local development.
 
-Open `http://project-a.test:8080`. Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream.
+先在管理台启动网关，然后打开 `http://project-a.test:8080`。Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream. 网关停止时，8080 端口不监听，访问会失败；这是为了确保请求不会绕过验证直接到达上游。
 
 ## Configure a site
 
-Edit `config.toml` and add one `[[sites]]` block for each local application:
+Edit `config.toml` and add one `[[sites]]` block for each local application. The list may remain empty on first launch; add routes later from the management dashboard:
 
 ```toml
 [[sites]]
@@ -96,6 +98,9 @@ POST     /api/whitelist/delete
 POST     /api/reload
 GET      /api/system
 POST     /api/license/activate
+GET      /api/gateway/status
+POST     /api/gateway/start
+POST     /api/gateway/stop
 ```
 
 Changes made in the dashboard are applied immediately. Bot Gate does not watch `config.toml` for file changes: after adding or editing `[[sites]]` by hand, click **Reload config** in the dashboard or call `POST /api/reload`. This replaces the managed site/whitelist list from the file and refreshes runtime routing. A restart also applies the file. Listener, verification, security, storage, admin, update and license settings require a process restart. The SQLite database is stored at `storage.database` (default: `data/bot-gate.db`).
@@ -138,3 +143,5 @@ See [docs/SECURITY.md](docs/SECURITY.md) for threat boundaries and [docs/ARCHITE
 ## Cross-platform release and online update
 
 The current workflow builds directly from this repository and publishes release archives. Source privacy can be addressed later after the project structure is stable. See [docs/RELEASE.md](docs/RELEASE.md) for release steps and the `[update]` configuration. The dashboard can check the latest GitHub Release and open its download page; it does not replace a running executable automatically.
+
+Windows release archives are self-contained: keep `bot-gate.exe`, `config.toml`, and `frontend/dist` together after extraction. Double-clicking `bot-gate.exe` starts the loopback management service and leaves a Bot Gate icon in the system tray; the tray menu opens the management dashboard or exits the process. The executable resolves these files relative to itself, so its behavior does not depend on the directory from which it was launched.

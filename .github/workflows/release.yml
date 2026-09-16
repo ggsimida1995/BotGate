@@ -38,6 +38,9 @@ jobs:
           cp backend/config.example.toml "$dir/config.toml"
           cp -R frontend/dist "$dir/frontend/"
           cp LICENSE README.md "$dir/"
+          test -f "$dir/config.toml"
+          test -f "$dir/frontend/dist/admin.html"
+          test -f "$dir/frontend/dist/challenge.html"
           tar -czf "${dir}.tar.gz" "$dir"
           sha256sum "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
       - uses: softprops/action-gh-release@v2
@@ -109,6 +112,9 @@ jobs:
           Copy-Item backend/config.example.toml "$dir/config.toml"
           Copy-Item frontend/dist "$dir/frontend/" -Recurse
           Copy-Item LICENSE, README.md "$dir/"
+          if (-not (Test-Path "$dir/config.toml")) { throw "config.toml missing from package" }
+          if (-not (Test-Path "$dir/frontend/dist/admin.html")) { throw "admin.html missing from package" }
+          if (-not (Test-Path "$dir/frontend/dist/challenge.html")) { throw "challenge.html missing from package" }
           Compress-Archive -Path $dir -DestinationPath "$dir.zip" -Force
           $hash = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower()
           "$hash  $dir.zip" | Set-Content "$dir.zip.sha256"

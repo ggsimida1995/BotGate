@@ -176,14 +176,71 @@ pub(crate) async fn admin_system(
     if let Some(response) = admin_access(remote) {
         return response;
     }
+    let gateway = state.gateway.status().await;
     json_response(
         StatusCode::OK,
         serde_json::json!({
             "version": APP_VERSION,
             "update_enabled": state.public_state.update.enabled,
             "release_url": state.public_state.update.release_url,
-            "license": crate::license::status(&state.public_state.license)
+            "license": crate::license::status(&state.public_state.license),
+            "gateway": gateway
         }),
+    )
+}
+
+pub(crate) async fn admin_gateway_status(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({
+            "gateway": state.gateway.status().await,
+            "license": crate::license::status(&state.public_state.license),
+        }),
+    )
+}
+
+pub(crate) async fn admin_gateway_start(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let license = crate::license::status(&state.public_state.license);
+    if state.public_state.license.enabled && license.status != "active" {
+        return json_response(
+            StatusCode::PAYMENT_REQUIRED,
+            serde_json::json!({"message":"a valid license is required before starting the gateway", "license":license}),
+        );
+    }
+    match state.gateway.start().await {
+        Ok(gateway) => json_response(StatusCode::OK, serde_json::json!({"gateway": gateway})),
+        Err(error) => {
+            error!(error = %error, "failed to start gateway");
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"failed to start gateway"}),
+            )
+        }
+    }
+}
+
+pub(crate) async fn admin_gateway_stop(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"gateway": state.gateway.stop().await}),
     )
 }
 

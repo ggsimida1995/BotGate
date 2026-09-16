@@ -1,6 +1,6 @@
 [package]
 name = "bot-gate"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "Cross-platform local web bot gate and reverse proxy"
 license = "MIT"
@@ -29,3 +29,7 @@ tower-http = { version = "0.6", features = ["fs", "limit"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 url = "2"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+tray-item = "0.10"
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }

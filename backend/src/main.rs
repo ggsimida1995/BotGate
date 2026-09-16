@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 use std::{
     collections::HashMap,
     env,
@@ -10,6 +12,7 @@ use std::{
 mod admin;
 mod caddy;
 mod config;
+mod gateway;
 mod http;
 mod license;
 mod proxy;
@@ -17,14 +20,16 @@ mod security;
 mod storage;
 #[cfg(test)]
 mod tests;
+mod tray;
 mod verification;
 
 use admin::{
     admin_activate_license, admin_clear_interceptions, admin_clear_requests, admin_dashboard,
-    admin_delete_ban, admin_delete_site, admin_delete_whitelist, admin_interception_detail,
-    admin_list_bans, admin_list_challenges, admin_list_interceptions, admin_list_requests,
-    admin_list_sites, admin_list_whitelist, admin_page, admin_reload_config, admin_request_detail,
-    admin_save_ban, admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site,
+    admin_delete_ban, admin_delete_site, admin_delete_whitelist, admin_gateway_start,
+    admin_gateway_status, admin_gateway_stop, admin_interception_detail, admin_list_bans,
+    admin_list_challenges, admin_list_interceptions, admin_list_requests, admin_list_sites,
+    admin_list_whitelist, admin_page, admin_reload_config, admin_request_detail, admin_save_ban,
+    admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -34,9 +39,10 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use axum_server::{tls_rustls::RustlsConfig, Handle as TlsHandle};
+use axum_server::tls_rustls::RustlsConfig;
 use config::*;
 pub(crate) use config::{load_config, normalize_host, resolve_upstream_ip, validate_upstream};
+use gateway::GatewayController;
 pub(crate) use http::{
     cookie_from_request, is_api_request, is_static_asset_path, json_response,
     rate_limited_response, response_with,
@@ -50,8 +56,8 @@ use ipnet::IpNet;
 use proxy::{header_bytes, https_redirect_response, proxy_request};
 use security::{BanEntry, SecurityState, WhitelistRule};
 use storage::{ManagedSite, ManagedWhitelist, RequestLog, SecurityEvent, Storage};
-use tokio::net::TcpListener;
-use tower_http::{limit::RequestBodyLimitLayer, services::ServeDir};
+use tokio::{net::TcpListener, sync::mpsc};
+use tower_http::services::ServeDir;
 use tracing::{error, info, warn};
 use verification::{
     handle_verification, is_verification_path, verification_redirect, verify_cookie,
@@ -62,10 +68,24 @@ const DEFAULT_CONFIG: &str = "config.toml";
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn default_config_path() -> PathBuf {
-    for candidate in [
+    let mut candidates = Vec::new();
+    if let Ok(executable) = env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            let mut current = Some(directory);
+            for _ in 0..5 {
+                if let Some(path) = current {
+                    candidates.push(path.join(DEFAULT_CONFIG));
+                    candidates.push(path.join("backend").join(DEFAULT_CONFIG));
+                    current = path.parent();
+                }
+            }
+        }
+    }
+    candidates.extend([
         PathBuf::from(DEFAULT_CONFIG),
         PathBuf::from("backend").join(DEFAULT_CONFIG),
-    ] {
+    ]);
+    for candidate in candidates {
         if candidate.exists() {
             return candidate;
         }
@@ -73,7 +93,7 @@ fn default_config_path() -> PathBuf {
     PathBuf::from(DEFAULT_CONFIG)
 }
 
-struct AppState {
+pub(crate) struct AppState {
     sites: RwLock<HashMap<String, SiteConfig>>,
     client: Client<HttpConnector, Body>,
     frontend_dist: PathBuf,
@@ -90,13 +110,14 @@ struct AppState {
 }
 
 #[derive(Clone, Copy)]
-struct RequestScheme(&'static str);
+pub(crate) struct RequestScheme(pub(crate) &'static str);
 
 struct AdminState {
     storage: Arc<Storage>,
     public_state: Arc<AppState>,
     config_path: PathBuf,
     tls_config: Option<RustlsConfig>,
+    gateway: Arc<GatewayController>,
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -162,7 +183,7 @@ fn record_request_log(
     });
 }
 
-async fn handle_request(
+pub(crate) async fn handle_request(
     State(state): State<Arc<AppState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
     scheme: Option<Extension<RequestScheme>>,
@@ -641,16 +662,25 @@ fn whitelist_rule_from_record(entry: &ManagedWhitelist) -> Result<WhitelistRule>
 
 fn frontend_dist_path(config_path: &Path) -> PathBuf {
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let local = config_dir.join("frontend/dist");
-    if local.exists() {
-        local
-    } else {
-        config_dir.join("../frontend/dist")
-    }
+    let candidates = [
+        config_dir.join("frontend/dist"),
+        config_dir.join("frontend\\dist"),
+        config_dir.join("../frontend/dist"),
+    ];
+    candidates
+        .into_iter()
+        .find(|path| path.join("admin.html").exists() && path.join("challenge.html").exists())
+        .unwrap_or_else(|| config_dir.join("frontend/dist"))
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() {
+    if let Err(error) = run().await {
+        report_startup_error(&error);
+    }
+}
+
+async fn run() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
     let config_path = env::args_os()
         .nth(1)
@@ -672,67 +702,40 @@ async fn main() -> Result<()> {
     } else {
         None
     };
+    let body_limit = usize::try_from(config.server.max_body_size)
+        .context("server.max_body_size does not fit in usize")?;
+    let gateway = GatewayController::new(
+        state.clone(),
+        config.server.listen.clone(),
+        config.tls.enabled.then(|| config.tls.listen.clone()),
+        tls_config.clone(),
+        body_limit,
+    );
     let admin_state = if config.admin.enabled {
         Some(Arc::new(AdminState {
             storage: state.storage.clone(),
             public_state: state.clone(),
             config_path: config_path.clone(),
             tls_config: tls_config.clone(),
+            gateway: gateway.clone(),
         }))
     } else {
         None
     };
-    let listener = TcpListener::bind(&config.server.listen)
-        .await
-        .with_context(|| format!("failed to bind {}", config.server.listen))?;
-    let address = listener.local_addr()?;
-    info!(%address, sites = state.sites.read().map(|sites| sites.len()).unwrap_or(0), "bot-gate phase 5 listening");
-    let body_limit = usize::try_from(config.server.max_body_size)
-        .context("server.max_body_size does not fit in usize")?;
-    let app = Router::new()
-        .nest_service(
-            "/_bot_gate/assets",
-            ServeDir::new(state.frontend_dist.join("assets")),
-        )
-        .fallback(handle_request)
-        .layer(RequestBodyLimitLayer::new(body_limit))
-        .layer(Extension(RequestScheme("http")))
-        .with_state(state.clone());
-    if let Some(tls_config) = tls_config {
-        let tls_addr: SocketAddr = config
-            .tls
-            .listen
-            .parse()
-            .with_context(|| format!("invalid tls.listen: {}", config.tls.listen))?;
-        let tls_app = Router::new()
-            .nest_service(
-                "/_bot_gate/assets",
-                ServeDir::new(state.frontend_dist.join("assets")),
-            )
-            .fallback(handle_request)
-            .layer(RequestBodyLimitLayer::new(body_limit))
-            .layer(Extension(RequestScheme("https")))
-            .with_state(state.clone());
-        let tls_handle = TlsHandle::new();
-        let tls_shutdown_handle = tls_handle.clone();
-        tokio::spawn(async move {
-            shutdown_signal().await;
-            tls_shutdown_handle.graceful_shutdown(Some(Duration::from_secs(30)));
-        });
-        tokio::spawn(async move {
-            if let Err(error) = axum_server::bind_rustls(tls_addr, tls_config)
-                .handle(tls_handle.clone())
-                .serve(tls_app.into_make_service_with_connect_info::<SocketAddr>())
-                .await
-            {
-                error!(error = %error, "TLS server failed");
-            }
-        });
-    }
     if let Some(admin_state) = admin_state {
         let admin_listener = TcpListener::bind(&config.admin.listen)
             .await
             .with_context(|| format!("failed to bind admin listener {}", config.admin.listen))?;
+        let admin_url = format!("http://{}", config.admin.listen);
+        let (tray_handle, mut tray_events, tray_enabled) = match tray::start(admin_url.clone()) {
+            Ok((handle, events)) => (Some(handle), events, true),
+            Err(error) => {
+                warn!(error = %error, "system tray unavailable; management API remains available");
+                let (_, events) = mpsc::unbounded_channel();
+                (None, events, false)
+            }
+        };
+        let _tray_handle = tray_handle;
         let admin_app = Router::new()
             .route("/", get(admin_page))
             .nest_service(
@@ -741,6 +744,9 @@ async fn main() -> Result<()> {
             )
             .route("/api/dashboard", get(admin_dashboard))
             .route("/api/system", get(admin_system))
+            .route("/api/gateway/status", get(admin_gateway_status))
+            .route("/api/gateway/start", post(admin_gateway_start))
+            .route("/api/gateway/stop", post(admin_gateway_stop))
             .route("/api/license/activate", post(admin_activate_license))
             .route("/api/requests", get(admin_list_requests))
             .route("/api/requests/clear", post(admin_clear_requests))
@@ -762,7 +768,7 @@ async fn main() -> Result<()> {
             .route("/api/reload", post(admin_reload_config))
             .with_state(admin_state);
         info!(address = %admin_listener.local_addr()?, "bot-gate admin listening");
-        tokio::spawn(async move {
+        let mut admin_task = tokio::spawn(async move {
             if let Err(error) = axum::serve(
                 admin_listener,
                 admin_app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -773,15 +779,68 @@ async fn main() -> Result<()> {
                 error!(error = %error, "admin server failed");
             }
         });
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                result = &mut admin_task => {
+                    if let Err(error) = result {
+                        error!(error = %error, "admin task failed");
+                    }
+                    break;
+                }
+                _ = &mut shutdown => {
+                    admin_task.abort();
+                    break;
+                }
+                command = tray_events.recv(), if tray_enabled => {
+                    match command {
+                        Some(tray::TrayCommand::OpenAdmin) => {
+                            if let Err(error) = tray::open_admin(&admin_url) {
+                                warn!(error = %error, "failed to open management dashboard from tray");
+                            }
+                        }
+                        Some(tray::TrayCommand::Exit) | None => {
+                            admin_task.abort();
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        gateway.stop().await;
+    } else {
+        warn!("admin listener is disabled; gateway must be started from the admin listener");
+        shutdown_signal().await;
     }
-    axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("server failed")?;
     Ok(())
+}
+
+fn report_startup_error(error: &anyhow::Error) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+
+        let message: Vec<u16> = std::ffi::OsStr::new(&error.to_string())
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let title: Vec<u16> = std::ffi::OsStr::new("Bot Gate 启动失败")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                message.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    eprintln!("Bot Gate startup failed: {error:#}");
 }
 
 async fn shutdown_signal() {

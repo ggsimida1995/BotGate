@@ -587,9 +587,6 @@ fn resolve_relative_paths(config: &mut Config, config_path: &Path) {
 }
 
 pub(crate) fn validate_config(config: &Config) -> Result<()> {
-    if config.sites.is_empty() {
-        bail!("at least one site must be configured");
-    }
     if config.server.max_header_bytes == 0 || config.server.max_header_bytes > 1024 * 1024 {
         bail!("server.max_header_bytes must be between 1 and 1048576");
     }

@@ -3,6 +3,7 @@
 # Set [admin] below to enable the loopback-only management UI.
 
 [server]
+# The gateway listener is started manually from the management dashboard.
 # Use 0.0.0.0 only when the gate must be reachable from the LAN.
 listen = "127.0.0.1:8080"
 request_timeout_secs = 30
@@ -60,7 +61,8 @@ database = "data/bot-gate.db"
 log_retention = "7d"
 persist_request_logs = true
 
-# This listener must remain on a loopback address.
+# This listener starts with the process and remains available while the gateway is stopped.
+# Keep it on a loopback address.
 [admin]
 enabled = true
 listen = "127.0.0.1:9090"
@@ -93,3 +95,11 @@ allow_private_networks = false
 # Domain upstreams are resolved per request and accepted only when they resolve
 # to an allowed loopback/private address.
 allow_dns = false
+
+# Optional initial routes. You can leave this list empty and add sites from
+# the management dashboard after the package starts.
+# [[sites]]
+# host = "project.local"
+# target = "http://127.0.0.1:3000"
+# policy = "normal"
+# enabled = true
