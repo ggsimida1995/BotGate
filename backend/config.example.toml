@@ -68,10 +68,9 @@ enabled = true
 listen = "127.0.0.1:9090"
 
 # GitHub Release link shown in the management dashboard.
-# Keep disabled until a public release URL is configured.
 [update]
-enabled = false
-release_url = ""
+enabled = true
+release_url = "https://api.github.com/repos/ggsimida1995/BotGate/releases/latest"
 
 # Optional signed one-year license verification.
 # The public key is base64/base64url-encoded Ed25519 public key bytes.

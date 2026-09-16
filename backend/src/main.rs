@@ -112,10 +112,8 @@ fn macos_resource_dir() -> Option<PathBuf> {
 
 #[cfg(target_os = "macos")]
 fn macos_user_config_path() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| {
-        PathBuf::from(home)
-            .join("Library/Application Support/BotGate/config.toml")
-    })
+    env::var_os("HOME")
+        .map(|home| PathBuf::from(home).join("Library/Application Support/BotGate/config.toml"))
 }
 
 fn prepare_config_path(config_path: PathBuf) -> Result<PathBuf> {
@@ -654,6 +652,11 @@ fn build_state(config: &Config, frontend_dist: PathBuf) -> Result<Arc<AppState>>
             },
         );
     }
+    let mut update = config.update.clone();
+    if update.release_url.trim().is_empty() {
+        update.enabled = true;
+        update.release_url = DEFAULT_RELEASE_URL.to_string();
+    }
     Ok(Arc::new(AppState {
         sites: RwLock::new(sites),
         client,
@@ -678,7 +681,7 @@ fn build_state(config: &Config, frontend_dist: PathBuf) -> Result<Arc<AppState>>
         storage,
         upstream_policy: config.upstream.clone(),
         caddy: config.caddy.clone(),
-        update: config.update.clone(),
+        update,
         license: config.license.clone(),
         https_redirect_port: if config.tls.enabled && config.tls.redirect_http {
             Some(config.tls.listen.parse::<SocketAddr>()?.port())
@@ -834,6 +837,9 @@ async fn run() -> Result<()> {
                 error!(error = %error, "admin server failed");
             }
         });
+        if let Err(error) = tray::open_admin(&admin_url) {
+            warn!(error = %error, "failed to open management dashboard automatically");
+        }
         let shutdown = shutdown_signal();
         tokio::pin!(shutdown);
         loop {

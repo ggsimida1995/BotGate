@@ -225,7 +225,7 @@ pub(crate) async fn admin_gateway_start(
             error!(error = %error, "failed to start gateway");
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"message":"failed to start gateway"}),
+                serde_json::json!({"message":format!("failed to start gateway: {error}")}),
             )
         }
     }

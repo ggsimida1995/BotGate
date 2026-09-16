@@ -1,6 +1,6 @@
 [package]
 name = "bot-gate"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "Cross-platform local web bot gate and reverse proxy"
 license = "MIT"
@@ -32,4 +32,4 @@ url = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-item = "0.10"
-windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.52", features = ["Win32_Foundation", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

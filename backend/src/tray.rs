@@ -1,8 +1,4 @@
-#[cfg(any(
-    target_os = "windows",
-    target_os = "macos",
-    all(unix, not(target_os = "macos"))
-))]
+#[cfg(unix)]
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -62,10 +58,30 @@ pub(crate) fn start(admin_url: String) -> Result<(TrayHandle, UnboundedReceiver<
 pub(crate) fn open_admin(url: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .context("failed to open management dashboard")?;
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+
+        let operation: Vec<u16> = std::ffi::OsStr::new("open")
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let target: Vec<u16> = std::ffi::OsStr::new(url)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let result = unsafe {
+            ShellExecuteW(
+                0,
+                operation.as_ptr(),
+                target.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        if result <= 32 {
+            anyhow::bail!("Windows failed to open management dashboard (code {result})");
+        }
     }
     #[cfg(target_os = "macos")]
     {

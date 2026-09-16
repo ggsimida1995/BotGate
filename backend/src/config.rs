@@ -44,6 +44,9 @@ pub(crate) struct UpdateConfig {
     pub(crate) release_url: String,
 }
 
+pub(crate) const DEFAULT_RELEASE_URL: &str =
+    "https://api.github.com/repos/ggsimida1995/BotGate/releases/latest";
+
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct LicenseConfig {
     #[serde(default)]
