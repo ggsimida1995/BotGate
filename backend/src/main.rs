@@ -22,6 +22,7 @@ mod storage;
 #[cfg(test)]
 mod tests;
 mod tray;
+mod updater;
 mod verification;
 
 use admin::{
@@ -30,7 +31,8 @@ use admin::{
     admin_gateway_status, admin_gateway_stop, admin_interception_detail, admin_list_bans,
     admin_list_challenges, admin_list_interceptions, admin_list_requests, admin_list_sites,
     admin_list_whitelist, admin_page, admin_reload_config, admin_request_detail, admin_save_ban,
-    admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site,
+    admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site, admin_update_apply,
+    admin_update_check,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -823,7 +825,8 @@ async fn run() -> Result<()> {
     if let Some(admin_state) = admin_state {
         let (admin_listener, admin_address) = bind_listener(&config.admin.listen, "admin").await?;
         let admin_url = format!("http://{admin_address}");
-        let (tray_handle, mut tray_events, tray_enabled) = match tray::start(admin_url.clone()) {
+        let (mut tray_handle, mut tray_events, tray_enabled) = match tray::start(admin_url.clone())
+        {
             Ok((handle, events)) => (Some(handle), events, true),
             Err(error) => {
                 warn!(error = %error, "system tray unavailable; management API remains available");
@@ -831,7 +834,6 @@ async fn run() -> Result<()> {
                 (None, events, false)
             }
         };
-        let _tray_handle = tray_handle;
         let admin_app = Router::new()
             .route("/", get(admin_page))
             .nest_service(
@@ -840,6 +842,8 @@ async fn run() -> Result<()> {
             )
             .route("/api/dashboard", get(admin_dashboard))
             .route("/api/system", get(admin_system))
+            .route("/api/update/check", get(admin_update_check))
+            .route("/api/update/apply", post(admin_update_apply))
             .route("/api/gateway/status", get(admin_gateway_status))
             .route("/api/gateway/start", post(admin_gateway_start))
             .route("/api/gateway/stop", post(admin_gateway_stop))
@@ -878,6 +882,14 @@ async fn run() -> Result<()> {
         if let Err(error) = tray::open_admin(&admin_url) {
             warn!(error = %error, "failed to open management dashboard automatically");
         }
+        #[cfg(target_os = "macos")]
+        if let Some(handle) = tray_handle.as_mut() {
+            handle.display();
+            admin_task.abort();
+            gateway.stop().await;
+            return Ok(());
+        }
+        let _tray_handle = tray_handle;
         let shutdown = shutdown_signal();
         tokio::pin!(shutdown);
         loop {

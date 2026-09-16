@@ -53,22 +53,6 @@ const metricCards = [
   { key: 'active_challenges', label: '进行中验证', icon: <GlobalOutlined />, tone: 'cyan', mode: 'challenges' },
 ];
 
-function versionParts(value) {
-  return String(value || '0.0.0')
-    .replace(/^v/i, '')
-    .split('.')
-    .map((part) => Number.parseInt(part, 10) || 0);
-}
-
-function isNewerVersion(remote, current) {
-  const left = versionParts(remote);
-  const right = versionParts(current);
-  for (let index = 0; index < 3; index += 1) {
-    if (left[index] !== right[index]) return left[index] > right[index];
-  }
-  return false;
-}
-
 async function api(path, options = {}) {
   const response = await fetch(path, {
     headers: { 'content-type': 'application/json', ...(options.headers || {}) },
@@ -94,6 +78,9 @@ function AdminConsole() {
   const [logModal, setLogModal] = useState(null);
   const [addModal, setAddModal] = useState(null);
   const [licenseModal, setLicenseModal] = useState(false);
+  const [updateModal, setUpdateModal] = useState(false);
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateLoading, setUpdateLoading] = useState(false);
   const [siteForm] = Form.useForm();
   const [banForm] = Form.useForm();
   const [whitelistForm] = Form.useForm();
@@ -132,20 +119,36 @@ function AdminConsole() {
       message.info('尚未配置 GitHub Release 更新地址');
       return;
     }
+    setUpdateLoading(true);
     try {
-      const response = await fetch(systemInfo.release_url, { headers: { accept: 'application/json' } });
-      if (!response.ok) throw new Error(`更新检查失败 (${response.status})`);
-      const release = await response.json();
-      const remoteVersion = release.version || release.tag_name;
-      if (!remoteVersion) throw new Error('更新清单缺少版本号');
-      if (isNewerVersion(remoteVersion, systemInfo.version)) {
-        message.success(`发现新版本 ${remoteVersion}，即将打开下载页面`);
-        window.open(release.html_url || release.url || systemInfo.release_url, '_blank', 'noopener,noreferrer');
+      const result = await api('/api/update/check');
+      const update = result.update;
+      setUpdateInfo(update);
+      if (update.update_available) {
+        setUpdateModal(true);
       } else {
-        message.success(`当前已是最新版本 v${systemInfo.version}`);
+        message.success(`当前已是最新版本 v${update.current_version}`);
       }
     } catch (cause) {
       message.error(cause.message);
+    } finally {
+      setUpdateLoading(false);
+    }
+  }
+
+  async function applyUpdate() {
+    setUpdateLoading(true);
+    try {
+      const result = await api('/api/update/apply', {
+        method: 'POST',
+        headers: { 'x-bot-gate-action': 'update' },
+      });
+      setUpdateModal(false);
+      message.success(result.update?.message || '更新包已校验，Bot Gate 将自动重启完成更新');
+    } catch (cause) {
+      message.error(cause.message);
+    } finally {
+      setUpdateLoading(false);
     }
   }
 
@@ -327,7 +330,7 @@ function AdminConsole() {
             {gatewayStatus.running ? '停止网关' : '启动网关'}
           </Button>
           <Tooltip title="激活许可证"><Button aria-label="激活许可证" icon={<KeyOutlined />} onClick={() => setLicenseModal(true)} /></Tooltip>
-          <Tooltip title="检查更新"><Button aria-label="检查更新" icon={<CloudDownloadOutlined />} onClick={checkForUpdates} /></Tooltip>
+          <Tooltip title="检查更新"><Button aria-label="检查更新" loading={updateLoading} icon={<CloudDownloadOutlined />} onClick={checkForUpdates} /></Tooltip>
           <Tooltip title="重新加载配置"><Button aria-label="重新加载配置" icon={<ReloadOutlined />} onClick={reloadConfig} /></Tooltip>
           <Tooltip title="刷新数据"><Button type="primary" aria-label="刷新数据" icon={<SyncOutlined spin={loading} />} onClick={refresh} /></Tooltip>
         </div>
@@ -447,6 +450,22 @@ function AdminConsole() {
             </Form.Item>
             <Button type="primary" htmlType="submit" block>验证并激活</Button>
           </Form>
+        </Modal>
+        <Modal
+          open={updateModal}
+          centered
+          title="发现新版本"
+          okText="下载并立即更新"
+          cancelText="暂不更新"
+          confirmLoading={updateLoading}
+          okButtonProps={{ type: 'primary' }}
+          onOk={applyUpdate}
+          onCancel={() => setUpdateModal(false)}
+        >
+          <p>当前版本：v{updateInfo?.current_version}</p>
+          <p>最新版本：v{updateInfo?.latest_version}</p>
+          <p>将下载并校验 <strong>{updateInfo?.asset?.name}</strong>，随后自动关闭并重启 Bot Gate。</p>
+          <p>配置文件、许可证和运行数据会被保留。</p>
         </Modal>
       </Content>
       <footer className="admin-footer">

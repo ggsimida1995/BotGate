@@ -12,9 +12,11 @@ pub(crate) enum TrayCommand {
 }
 
 pub(crate) struct TrayHandle {
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     tray: tray_item::TrayItem,
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    _keepalive: mpsc::UnboundedSender<TrayCommand>,
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     _keepalive: mpsc::UnboundedSender<TrayCommand>,
 }
 
@@ -79,10 +81,45 @@ pub(crate) fn start(admin_url: String) -> Result<(TrayHandle, UnboundedReceiver<
         return Ok((TrayHandle { tray }, receiver));
     }
 
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
+    {
+        use tray_item::{IconSource, TrayItem};
+
+        let mut tray = TrayItem::new(
+            "Bot Gate",
+            IconSource::Data {
+                width: 1024,
+                height: 1024,
+                data: include_bytes!("../../packaging/assets/bot-gate-icon.png").to_vec(),
+            },
+        )
+        .context("failed to create macOS menu bar icon")?;
+        let open_url = admin_url.clone();
+        tray.add_menu_item("打开管理后台", move || {
+            let _ = open_admin(&open_url);
+        })
+        .context("failed to create macOS management menu")?;
+        tray.inner_mut().add_quit_item("退出 Bot Gate");
+        Ok((
+            TrayHandle {
+                tray,
+                _keepalive: sender,
+            },
+            receiver,
+        ))
+    }
+
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
         let _ = admin_url;
         Ok((TrayHandle { _keepalive: sender }, receiver))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl TrayHandle {
+    pub(crate) fn display(&mut self) {
+        self.tray.inner_mut().display();
     }
 }
 

@@ -189,6 +189,50 @@ pub(crate) async fn admin_system(
     )
 }
 
+pub(crate) async fn admin_update_check(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    match crate::updater::check(&state.public_state.update, APP_VERSION).await {
+        Ok(update) => json_response(StatusCode::OK, serde_json::json!({"update": update})),
+        Err(error) => json_response(
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({"message": error.to_string()}),
+        ),
+    }
+}
+
+pub(crate) async fn admin_update_apply(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    if request
+        .headers()
+        .get("x-bot-gate-action")
+        .and_then(|value| value.to_str().ok())
+        != Some("update")
+    {
+        return json_response(
+            StatusCode::FORBIDDEN,
+            serde_json::json!({"message":"invalid update request"}),
+        );
+    }
+    match crate::updater::apply(&state.public_state.update, APP_VERSION).await {
+        Ok(update) => json_response(StatusCode::ACCEPTED, serde_json::json!({"update": update})),
+        Err(error) => json_response(
+            StatusCode::BAD_GATEWAY,
+            serde_json::json!({"message": error.to_string()}),
+        ),
+    }
+}
+
 pub(crate) async fn admin_gateway_status(
     State(state): State<Arc<AdminState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
