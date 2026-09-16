@@ -21,6 +21,37 @@ fn classifies_static_assets_without_treating_pages_as_assets() {
 }
 
 #[test]
+fn falls_back_for_unavailable_configured_listener_ports() {
+    assert!(should_try_ephemeral_port(
+        &std::io::Error::from(ErrorKind::AddrInUse),
+        8080
+    ));
+    assert!(should_try_ephemeral_port(
+        &std::io::Error::from(ErrorKind::PermissionDenied),
+        8080
+    ));
+    assert!(!should_try_ephemeral_port(
+        &std::io::Error::from(ErrorKind::PermissionDenied),
+        0
+    ));
+    assert!(!should_try_ephemeral_port(
+        &std::io::Error::from(ErrorKind::Other),
+        8080
+    ));
+}
+
+#[tokio::test]
+async fn falls_back_when_configured_listener_is_already_bound() {
+    let occupied = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let configured = occupied.local_addr().unwrap();
+    let (_listener, actual) = bind_listener(&configured.to_string(), "test")
+        .await
+        .unwrap();
+    assert_eq!(actual.ip(), configured.ip());
+    assert_ne!(actual.port(), configured.port());
+}
+
+#[test]
 fn logs_only_abnormal_static_asset_requests() {
     assert!(!should_record_request_log(
         "/assets/app.js",

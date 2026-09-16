@@ -68,6 +68,14 @@ use verification::{
 const DEFAULT_CONFIG: &str = "config.toml";
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+fn should_try_ephemeral_port(error: &std::io::Error, configured_port: u16) -> bool {
+    configured_port != 0
+        && matches!(
+            error.kind(),
+            ErrorKind::AddrInUse | ErrorKind::PermissionDenied
+        )
+}
+
 pub(crate) async fn bind_listener(listen: &str, label: &str) -> Result<(TcpListener, SocketAddr)> {
     let configured: SocketAddr = listen
         .parse()
@@ -77,15 +85,20 @@ pub(crate) async fn bind_listener(listen: &str, label: &str) -> Result<(TcpListe
             let address = listener.local_addr()?;
             Ok((listener, address))
         }
-        Err(error) if error.kind() == ErrorKind::AddrInUse && configured.port() != 0 => {
+        Err(error) if should_try_ephemeral_port(&error, configured.port()) => {
             let fallback = SocketAddr::new(configured.ip(), 0);
             let listener = TcpListener::bind(fallback).await.with_context(|| {
                 format!(
-                    "failed to bind {label} listener {listen}, and automatic port selection also failed"
+                    "failed to bind {label} listener {listen} ({error}), and automatic port selection also failed"
                 )
             })?;
             let address = listener.local_addr()?;
-            warn!(configured = %configured, actual = %address, "configured listener is occupied; using an automatic port");
+            warn!(
+                configured = %configured,
+                actual = %address,
+                reason = %error,
+                "configured listener is unavailable; using an automatic port"
+            );
             Ok((listener, address))
         }
         Err(error) => {
