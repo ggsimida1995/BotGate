@@ -69,19 +69,24 @@ jobs:
       - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"
-          dir="BotGate-${version}-macos-arm64"
-          mkdir -p "$dir/frontend"
-          cp backend/target/release/bot-gate "$dir/"
-          cp backend/config.example.toml "$dir/config.toml"
-          cp -R frontend/dist "$dir/frontend/"
-          cp LICENSE README.md "$dir/"
-          tar -czf "${dir}.tar.gz" "$dir"
-          shasum -a 256 "${dir}.tar.gz" > "${dir}.tar.gz.sha256"
+          app="BotGate-${version}-macos-arm64.app"
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/frontend"
+          cp backend/target/release/bot-gate "$app/Contents/MacOS/bot-gate"
+          chmod +x "$app/Contents/MacOS/bot-gate"
+          cp backend/config.example.toml "$app/Contents/Resources/config.toml"
+          cp -R frontend/dist "$app/Contents/Resources/frontend/"
+          cp LICENSE README.md "$app/Contents/Resources/"
+          sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
+          test -f "$app/Contents/Resources/config.toml"
+          test -f "$app/Contents/Resources/frontend/dist/admin.html"
+          test -f "$app/Contents/Resources/frontend/dist/challenge.html"
+          hdiutil create -volname "Bot Gate $version" -srcfolder "$app" -ov -format UDZO "BotGate-${version}-macos-arm64.dmg"
+          shasum -a 256 "BotGate-${version}-macos-arm64.dmg" > "BotGate-${version}-macos-arm64.dmg.sha256"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            BotGate-*.tar.gz
-            BotGate-*.tar.gz.sha256
+            BotGate-*.dmg
+            BotGate-*.dmg.sha256
 
   windows:
     name: Windows x64
@@ -102,24 +107,31 @@ jobs:
         working-directory: backend
         shell: pwsh
         run: cargo build --release --locked
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
       - name: Package
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.Substring(1)
-          $dir = "BotGate-$version-windows-x64"
-          New-Item -ItemType Directory -Force "$dir/frontend" | Out-Null
-          Copy-Item backend/target/release/bot-gate.exe "$dir/"
-          Copy-Item backend/config.example.toml "$dir/config.toml"
-          Copy-Item frontend/dist "$dir/frontend/" -Recurse
-          Copy-Item LICENSE, README.md "$dir/"
-          if (-not (Test-Path "$dir/config.toml")) { throw "config.toml missing from package" }
-          if (-not (Test-Path "$dir/frontend/dist/admin.html")) { throw "admin.html missing from package" }
-          if (-not (Test-Path "$dir/frontend/dist/challenge.html")) { throw "challenge.html missing from package" }
-          Compress-Archive -Path $dir -DestinationPath "$dir.zip" -Force
-          $hash = (Get-FileHash "$dir.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  $dir.zip" | Set-Content "$dir.zip.sha256"
+          $staging = "packaging/windows/staging"
+          New-Item -ItemType Directory -Force "$staging/frontend/dist" | Out-Null
+          Copy-Item backend/target/release/bot-gate.exe "$staging/"
+          Copy-Item backend/config.example.toml "$staging/config.toml"
+          Copy-Item frontend/dist/* "$staging/frontend/dist/" -Recurse
+          Copy-Item LICENSE, README.md "$staging/"
+          if (-not (Test-Path "$staging/config.toml")) { throw "config.toml missing from installer" }
+          if (-not (Test-Path "$staging/frontend/dist/admin.html")) { throw "admin.html missing from installer" }
+          if (-not (Test-Path "$staging/frontend/dist/challenge.html")) { throw "challenge.html missing from installer" }
+          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $compiler)) { throw "Inno Setup compiler not found" }
+          & $compiler "/DAppVersion=$version" "packaging/windows/BotGate.iss"
+          $installer = "packaging/windows/output/BotGate-$version-windows-x64-setup.exe"
+          Copy-Item $installer "."
+          $hash = (Get-FileHash "BotGate-$version-windows-x64-setup.exe" -Algorithm SHA256).Hash.ToLower()
+          "$hash  BotGate-$version-windows-x64-setup.exe" | Set-Content "BotGate-$version-windows-x64-setup.exe.sha256"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            BotGate-*.zip
-            BotGate-*.zip.sha256
+            BotGate-*-setup.exe
+            BotGate-*-setup.exe.sha256

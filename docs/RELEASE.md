@@ -2,9 +2,9 @@
 
 Bot Gate 的发布包由 GitHub Actions 在推送 `v*` 标签时自动生成，包含：
 
-- 对应平台的 `bot-gate` 可执行文件；
-- `frontend/dist` 管理台和验证页静态资源；
-- 可复制修改的 `config.toml`；
+- Linux 包包含 `bot-gate`、`frontend/dist` 和可复制修改的 `config.toml`；
+- macOS `.dmg` 包含完整 `.app`，内含后端、前端资源和默认配置；
+- Windows 安装程序包含后端、前端资源和默认配置；
 - `LICENSE` 与 `README.md`。
 
 ## 发布
@@ -14,8 +14,12 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流会生成 Linux x64、macOS arm64、Windows x64 三个压缩包并附加到 GitHub Release。
-版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.0` 时使用 `v0.2.0`。
+工作流会生成 Linux x64 压缩包、macOS arm64 安装磁盘映像（`.dmg`）和 Windows x64 安装程序（`.exe`），并附加到 GitHub Release。
+版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.2` 时使用 `v0.2.2`。
+
+macOS 安装包内含完整的 `.app`，其中包含 Rust 后端、`frontend/dist` 和默认 `config.toml`。将应用拖到“应用程序”后即可启动。首次启动会把配置复制到 `~/Library/Application Support/BotGate/`，数据库和签名密钥也会写入该用户目录，不需要修改应用包权限。
+
+Windows 安装程序会把后端、React 页面和默认配置安装到当前用户的 Bot Gate 目录，并创建开始菜单快捷方式；安装完成后可直接启动程序。
 
 ## Windows 启动
 

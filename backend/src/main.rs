@@ -69,6 +69,10 @@ pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn default_config_path() -> PathBuf {
     let mut candidates = Vec::new();
+    #[cfg(target_os = "macos")]
+    if let Some(path) = macos_user_config_path() {
+        candidates.push(path);
+    }
     if let Ok(executable) = env::current_exe() {
         if let Some(directory) = executable.parent() {
             let mut current = Some(directory);
@@ -81,6 +85,10 @@ fn default_config_path() -> PathBuf {
             }
         }
     }
+    #[cfg(target_os = "macos")]
+    if let Some(path) = macos_resource_dir().map(|dir| dir.join(DEFAULT_CONFIG)) {
+        candidates.push(path);
+    }
     candidates.extend([
         PathBuf::from(DEFAULT_CONFIG),
         PathBuf::from("backend").join(DEFAULT_CONFIG),
@@ -91,6 +99,48 @@ fn default_config_path() -> PathBuf {
         }
     }
     PathBuf::from(DEFAULT_CONFIG)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_resource_dir() -> Option<PathBuf> {
+    env::current_exe()
+        .ok()?
+        .parent()?
+        .parent()
+        .map(|contents| contents.join("Resources"))
+}
+
+#[cfg(target_os = "macos")]
+fn macos_user_config_path() -> Option<PathBuf> {
+    env::var_os("HOME").map(|home| {
+        PathBuf::from(home)
+            .join("Library/Application Support/BotGate/config.toml")
+    })
+}
+
+fn prepare_config_path(config_path: PathBuf) -> Result<PathBuf> {
+    #[cfg(target_os = "macos")]
+    if let (Some(resource_dir), Some(user_path)) = (macos_resource_dir(), macos_user_config_path())
+    {
+        if config_path.starts_with(&resource_dir) {
+            if !user_path.exists() {
+                if let Some(parent) = user_path.parent() {
+                    std::fs::create_dir_all(parent).with_context(|| {
+                        format!("failed to create config directory {}", parent.display())
+                    })?;
+                }
+                std::fs::copy(&config_path, &user_path).with_context(|| {
+                    format!(
+                        "failed to copy bundled config {} to {}",
+                        config_path.display(),
+                        user_path.display()
+                    )
+                })?;
+            }
+            return Ok(user_path);
+        }
+    }
+    Ok(config_path)
 }
 
 pub(crate) struct AppState {
@@ -662,11 +712,15 @@ fn whitelist_rule_from_record(entry: &ManagedWhitelist) -> Result<WhitelistRule>
 
 fn frontend_dist_path(config_path: &Path) -> PathBuf {
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
-    let candidates = [
+    let mut candidates = vec![
         config_dir.join("frontend/dist"),
         config_dir.join("frontend\\dist"),
         config_dir.join("../frontend/dist"),
     ];
+    #[cfg(target_os = "macos")]
+    if let Some(resource_dir) = macos_resource_dir() {
+        candidates.insert(0, resource_dir.join("frontend/dist"));
+    }
     candidates
         .into_iter()
         .find(|path| path.join("admin.html").exists() && path.join("challenge.html").exists())
@@ -686,6 +740,7 @@ async fn run() -> Result<()> {
         .nth(1)
         .map(PathBuf::from)
         .unwrap_or_else(default_config_path);
+    let config_path = prepare_config_path(config_path)?;
     let config = load_config(&config_path)?;
     let state = build_state(&config, frontend_dist_path(&config_path))?;
     let tls_config = if config.tls.enabled {
