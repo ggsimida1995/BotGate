@@ -15,7 +15,7 @@ git push origin v0.1.0
 ```
 
 工作流会生成 Linux x64 压缩包、macOS arm64 安装磁盘映像（`.dmg`）和 Windows x64 安装程序（`.exe`），并附加到 GitHub Release。
-版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.3` 时使用 `v0.2.3`。
+版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.4` 时使用 `v0.2.4`。
 
 macOS 安装包内含完整的 `.app`，其中包含 Rust 后端、`frontend/dist` 和默认 `config.toml`。将应用拖到“应用程序”后即可启动。首次启动会把配置复制到 `~/Library/Application Support/BotGate/`，数据库和签名密钥也会写入该用户目录，不需要修改应用包权限。
 

@@ -75,9 +75,12 @@ impl GatewayController {
             });
         }
 
-        let listener = TcpListener::bind(&self.http_listen)
-            .await
-            .with_context(|| format!("failed to bind gateway listener {}", self.http_listen))?;
+        let listener = TcpListener::bind(&self.http_listen).await.with_context(|| {
+            format!(
+                "gateway address {} is unavailable; stop the process using this port or change [server].listen",
+                self.http_listen
+            )
+        })?;
         let app = public_app(self.state.clone(), self.body_limit, "http");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
