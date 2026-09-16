@@ -831,12 +831,7 @@ fn report_startup_error(error: &anyhow::Error) {
             .chain(std::iter::once(0))
             .collect();
         unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                message.as_ptr(),
-                title.as_ptr(),
-                MB_OK | MB_ICONERROR,
-            );
+            MessageBoxW(0, message.as_ptr(), title.as_ptr(), MB_OK | MB_ICONERROR);
         }
     }
     #[cfg(not(target_os = "windows"))]
