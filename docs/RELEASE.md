@@ -15,25 +15,17 @@ git push origin v0.1.0
 ```
 
 工作流会生成 Linux x64 压缩包、macOS arm64 安装磁盘映像（`.dmg`）和 Windows x64 安装程序（`.exe`），并附加到 GitHub Release。
-版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.5` 时使用 `v0.2.5`。
+版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.6` 时使用 `v0.2.6`。
 
 macOS 安装包内含完整的 `.app`，其中包含 Rust 后端、`frontend/dist` 和默认 `config.toml`。将应用拖到“应用程序”后即可启动。首次启动会把配置复制到 `~/Library/Application Support/BotGate/`，数据库和签名密钥也会写入该用户目录，不需要修改应用包权限。
 
-Windows 安装程序会把后端、React 页面和默认配置安装到当前用户的 Bot Gate 目录，并创建开始菜单快捷方式；安装完成后可直接启动程序。
+Windows 安装程序会把后端、React 页面、默认配置和应用图标安装到当前用户的 Bot Gate 目录，并创建开始菜单快捷方式；安装完成后可直接启动程序。
+
+应用图标源文件位于 `packaging/assets/`：SVG 源稿、压缩 PNG、Windows `.ico` 和 macOS `.icns`。发布包不包含带水印的原始设计图。
 
 ## Windows 启动
 
-解压后不要只复制 `bot-gate.exe`。保持下面的目录结构，并直接双击 `bot-gate.exe`：
-
-```text
-BotGate-<version>-windows-x64/
-  bot-gate.exe
-  config.toml
-  frontend/dist/admin.html
-  frontend/dist/challenge.html
-```
-
-程序会按可执行文件所在目录查找 `config.toml` 和 `frontend/dist`，因此不依赖当前命令行目录。Windows 版本不会弹出控制台窗口，而是在系统托盘驻留；右键托盘图标会打开实际管理地址，默认是 `http://127.0.0.1:9090`，若端口被占用则自动使用空闲端口。配置错误等启动失败会弹出错误对话框。
+直接运行安装程序即可。安装器会把后端、配置、前端资源和 `bot-gate.ico` 放入同一安装目录，并创建带图标的快捷方式。Windows 版本不会弹出控制台窗口，而是在系统托盘驻留；右键托盘图标会打开实际管理地址，默认是 `http://127.0.0.1:9090`，若端口被占用则自动使用空闲端口。配置错误等启动失败会弹出错误对话框。
 
 首次运行会在包目录附近创建 `data/secret.key` 和 SQLite 数据库。升级时保留 `config.toml` 与 `data/`，只替换可执行文件和 `frontend/` 目录。
 

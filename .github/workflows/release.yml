@@ -76,10 +76,12 @@ jobs:
           cp backend/config.example.toml "$app/Contents/Resources/config.toml"
           cp -R frontend/dist "$app/Contents/Resources/frontend/"
           cp LICENSE README.md "$app/Contents/Resources/"
+          cp packaging/assets/bot-gate-icon.icns "$app/Contents/Resources/"
           sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
           test -f "$app/Contents/Resources/config.toml"
           test -f "$app/Contents/Resources/frontend/dist/admin.html"
           test -f "$app/Contents/Resources/frontend/dist/challenge.html"
+          test -f "$app/Contents/Resources/bot-gate-icon.icns"
           hdiutil create -volname "Bot Gate $version" -srcfolder "$app" -ov -format UDZO "BotGate-${version}-macos-arm64.dmg"
           shasum -a 256 "BotGate-${version}-macos-arm64.dmg" > "BotGate-${version}-macos-arm64.dmg.sha256"
       - uses: softprops/action-gh-release@v2
@@ -118,6 +120,7 @@ jobs:
           New-Item -ItemType Directory -Force "$staging/frontend/dist" | Out-Null
           Copy-Item backend/target/release/bot-gate.exe "$staging/"
           Copy-Item backend/config.example.toml "$staging/config.toml"
+          Copy-Item packaging/assets/bot-gate-icon.ico "$staging/bot-gate.ico"
           Copy-Item frontend/dist/* "$staging/frontend/dist/" -Recurse
           Copy-Item LICENSE, README.md "$staging/"
           if (-not (Test-Path "$staging/config.toml")) { throw "config.toml missing from installer" }

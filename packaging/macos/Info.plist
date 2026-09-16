@@ -6,6 +6,10 @@
 	<string>Bot Gate</string>
 	<key>CFBundleExecutable</key>
 	<string>bot-gate</string>
+	<key>CFBundleIconFile</key>
+	<string>bot-gate-icon.icns</string>
+	<key>CFBundleIconName</key>
+	<string>bot-gate-icon</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.ggsimida.botgate</string>
 	<key>CFBundleName</key>

@@ -24,13 +24,44 @@ pub(crate) fn start(admin_url: String) -> Result<(TrayHandle, UnboundedReceiver<
 
     #[cfg(target_os = "windows")]
     {
+        use std::{env, os::windows::ffi::OsStrExt, path::PathBuf};
         use tray_item::{IconSource, TrayItem};
         use windows_sys::Win32::{
             Foundation::HINSTANCE,
-            UI::WindowsAndMessaging::{LoadIconW, IDI_APPLICATION},
+            UI::WindowsAndMessaging::{LoadIconW, LoadImageW, IMAGE_ICON, LR_LOADFROMFILE},
         };
 
-        let icon = unsafe { IconSource::RawIcon(LoadIconW(0 as HINSTANCE, IDI_APPLICATION)) };
+        let icon_path = env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(PathBuf::from))
+            .map(|path| path.join("bot-gate.ico"));
+        let icon = icon_path
+            .as_ref()
+            .filter(|path| path.exists())
+            .and_then(|path| {
+                let wide: Vec<u16> = path
+                    .as_os_str()
+                    .encode_wide()
+                    .chain(std::iter::once(0))
+                    .collect();
+                let handle = unsafe {
+                    LoadImageW(
+                        0 as HINSTANCE,
+                        wide.as_ptr(),
+                        IMAGE_ICON,
+                        0,
+                        0,
+                        LR_LOADFROMFILE,
+                    )
+                };
+                (handle != 0).then(|| IconSource::RawIcon(handle))
+            })
+            .unwrap_or_else(|| unsafe {
+                IconSource::RawIcon(LoadIconW(
+                    0 as HINSTANCE,
+                    windows_sys::Win32::UI::WindowsAndMessaging::IDI_APPLICATION,
+                ))
+            });
         let mut tray =
             TrayItem::new("Bot Gate", icon).context("failed to create Windows tray icon")?;
         let open_sender = sender.clone();
