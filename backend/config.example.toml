@@ -90,12 +90,13 @@ server = "srv0"
 gate_upstream = "127.0.0.1:8080"
 
 [upstream]
-# Phase 1 defaults to loopback-only upstreams to reduce SSRF risk.
+# Local/private upstreams are allowed by default for self-hosted projects.
+# Runtime DNS resolution still rejects public addresses.
 allow_loopback = true
-allow_private_networks = false
+allow_private_networks = true
 # Domain upstreams are resolved per request and accepted only when they resolve
 # to an allowed loopback/private address.
-allow_dns = false
+allow_dns = true
 
 # Optional initial routes. You can leave this list empty and add sites from
 # the management dashboard after the package starts.

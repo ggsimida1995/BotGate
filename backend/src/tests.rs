@@ -76,14 +76,17 @@ fn logs_only_abnormal_static_asset_requests() {
 }
 
 #[test]
-fn rejects_unsafe_upstream() {
+fn validates_upstream_policy_boundaries() {
     let policy = UpstreamPolicy::default();
     assert!(validate_upstream("file:///tmp/app", &policy).is_err());
-    assert!(validate_upstream("http://192.168.1.10:9000", &policy).is_err());
-    assert!(validate_upstream("http://backend.test:9000", &policy).is_err());
-    let mut dns_policy = policy.clone();
-    dns_policy.allow_dns = true;
-    assert!(validate_upstream("http://backend.test:9000", &dns_policy).is_ok());
+    assert!(validate_upstream("http://192.168.1.10:9000", &policy).is_ok());
+    assert!(validate_upstream("http://backend.test:9000", &policy).is_ok());
+    assert!(validate_upstream("http://8.8.8.8:53", &policy).is_err());
+    let mut hardened_policy = policy.clone();
+    hardened_policy.allow_private_networks = false;
+    hardened_policy.allow_dns = false;
+    assert!(validate_upstream("http://192.168.1.10:9000", &hardened_policy).is_err());
+    assert!(validate_upstream("http://backend.test:9000", &hardened_policy).is_err());
     assert!(validate_upstream("http://127.0.0.1:9000", &policy).is_ok());
 }
 

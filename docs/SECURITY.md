@@ -23,7 +23,7 @@ Bot Gate is designed to block simple local-network scanners and reduce accidenta
 
 ## SSRF policy
 
-HTTP upstreams using an IP literal or `localhost` remain the default. With `upstream.allow_dns = true`, domain names are resolved on every request, every returned address is checked against the loopback/private-network policy, and the proxy connects to the checked IP while preserving the configured Host header. Unix sockets, metadata-specific deny lists and TLS upstreams remain deferred.
+HTTP upstreams using an IP literal, `localhost`, or a local DNS name are enabled by default for self-hosted projects. Domain names are resolved on every request, every returned address is checked against the loopback/private-network policy, and the proxy connects to the checked IP while preserving the configured Host header. Public DNS results remain blocked. Set `upstream.allow_private_networks = false` and/or `upstream.allow_dns = false` for a stricter deployment. Unix sockets, metadata-specific deny lists and TLS upstreams remain deferred.
 
 ## Current verification behavior
 

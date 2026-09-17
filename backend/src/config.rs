@@ -160,9 +160,9 @@ impl Default for ServerConfig {
 pub(crate) struct UpstreamPolicy {
     #[serde(default = "default_true")]
     pub(crate) allow_loopback: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub(crate) allow_private_networks: bool,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub(crate) allow_dns: bool,
 }
 
@@ -327,8 +327,8 @@ impl Default for UpstreamPolicy {
     fn default() -> Self {
         Self {
             allow_loopback: true,
-            allow_private_networks: false,
-            allow_dns: false,
+            allow_private_networks: true,
+            allow_dns: true,
         }
     }
 }
@@ -719,11 +719,14 @@ pub(crate) fn validate_upstream(target: &str, policy: &UpstreamPolicy) -> Result
         return if allowed_upstream_ip(ip, policy) {
             Ok(())
         } else {
+            if is_private_or_link_local(ip) {
+                bail!("upstream address is not allowed by the SSRF policy; enable upstream.allow_private_networks for LAN targets")
+            }
             bail!("upstream address is not allowed by the SSRF policy")
         };
     }
     if !policy.allow_dns {
-        bail!("DNS upstreams are disabled by the SSRF policy");
+        bail!("DNS upstreams are disabled by the SSRF policy; enable upstream.allow_dns for local hostnames");
     }
     if host.is_empty()
         || host.len() > 253
@@ -753,10 +756,13 @@ pub(crate) async fn resolve_upstream_ip(target: &Url, policy: &UpstreamPolicy) -
         if allowed_upstream_ip(ip, policy) {
             return Ok(ip);
         }
+        if is_private_or_link_local(ip) {
+            bail!("upstream address is not allowed by the SSRF policy; enable upstream.allow_private_networks for LAN targets");
+        }
         bail!("upstream address is not allowed by the SSRF policy");
     }
     if !host.eq_ignore_ascii_case("localhost") && !policy.allow_dns {
-        bail!("DNS upstreams are disabled by the SSRF policy");
+        bail!("DNS upstreams are disabled by the SSRF policy; enable upstream.allow_dns for local hostnames");
     }
     let port = target
         .port_or_known_default()

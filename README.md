@@ -72,7 +72,7 @@ enabled = true
 
 Keep `verification.enabled = true` to require the Browser Challenge. `verification.cookie_ttl` controls the signed-cookie lifetime; `verification.challenge_ttl` controls how long a pending challenge is valid. Keep `verification.secret_file` on local storage and do not delete it while the service is running, or all existing cookies become invalid.
 
-The default upstream policy accepts loopback targets only. Set `upstream.allow_private_networks = true` or `upstream.allow_dns = true` only when the deployment requires it.
+The default upstream policy accepts local loopback/private targets and local DNS names. DNS targets are resolved on every request and are still accepted only when they resolve to a loopback, private, or link-local address; public addresses are rejected. Set either option to `false` when a stricter deployment policy is required.
 
 ## Existing HTTPS server (Caddy/ServBay)
 
