@@ -12,6 +12,7 @@ use axum::{
 use hyper::{header, Request, StatusCode};
 use serde::{de::DeserializeOwned, Deserialize};
 
+use crate::nginx::NginxSite;
 use crate::storage::{BanRecord, LogFilter};
 use crate::*;
 
@@ -34,6 +35,18 @@ struct AdminHostInput {
 struct AdminSiteToggleInput {
     host: String,
     enabled: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminNginxScanInput {
+    config_dir: String,
+    binary: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminNginxToggleInput {
+    id: String,
+    protected: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -617,6 +630,32 @@ fn refresh_managed_runtime(state: &AdminState) -> Result<()> {
     Ok(())
 }
 
+fn sync_nginx_sites(state: &AdminState, sites: &[NginxSite]) -> Result<()> {
+    for site in sites.iter().filter(|site| site.supported) {
+        state.storage.upsert_site(&ManagedSite {
+            host: site.host.clone(),
+            target: site.target.clone(),
+            policy: default_policy(),
+            enabled: site.protected,
+        })?;
+    }
+    refresh_managed_runtime(state)
+}
+
+fn scan_nginx(state: &AdminState) -> (Option<Vec<NginxSite>>, Option<String>) {
+    let mut nginx = match state.nginx.lock() {
+        Ok(nginx) => nginx,
+        Err(_) => return (None, Some("Nginx 扫描状态不可用".to_string())),
+    };
+    if nginx.config_dir().is_none() {
+        return (Some(Vec::new()), None);
+    }
+    match nginx.scan() {
+        Ok(sites) => (Some(sites), None),
+        Err(error) => (None, Some(error.to_string())),
+    }
+}
+
 pub(crate) async fn admin_list_sites(
     State(state): State<Arc<AdminState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
@@ -624,14 +663,52 @@ pub(crate) async fn admin_list_sites(
     if let Some(response) = admin_access(remote) {
         return response;
     }
+    let (nginx_sites, nginx_error) = scan_nginx(&state);
+    if let Some(sites) = nginx_sites.as_deref() {
+        if let Err(error) = sync_nginx_sites(&state, sites) {
+            error!(error = %error, "failed to sync Nginx sites");
+        }
+    }
     match state.storage.managed_sites() {
-        Ok(sites) => json_response(
-            StatusCode::OK,
-            serde_json::json!({
-                "caddy_enabled": state.public_state.caddy.enabled,
-                "sites": sites.into_iter().map(|site| serde_json::json!({"host":site.host,"target":site.target,"policy":site.policy,"enabled":site.enabled})).collect::<Vec<_>>()
-            }),
-        ),
+        Ok(sites) => {
+            let discovered = nginx_sites.unwrap_or_default();
+            let discovered_hosts = discovered
+                .iter()
+                .map(|site| site.host.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let mut rows = discovered
+                .iter()
+                .map(|site| {
+                    serde_json::json!({
+                        "id": site.id,
+                        "host": site.host,
+                        "target": site.target,
+                        "policy": "normal",
+                        "enabled": site.protected,
+                        "source": "nginx",
+                        "config_file": site.config_file,
+                        "supported": site.supported
+                    })
+                })
+                .collect::<Vec<_>>();
+            rows.extend(sites.into_iter().filter(|site| !discovered_hosts.contains(&site.host)).map(|site| {
+                serde_json::json!({"id": format!("manual:{}", site.host), "host":site.host,"target":site.target,"policy":site.policy,"enabled":site.enabled,"source":"manual","supported":true})
+            }));
+            let nginx = state.nginx.lock().ok();
+            json_response(
+                StatusCode::OK,
+                serde_json::json!({
+                    "caddy_enabled": state.public_state.caddy.enabled,
+                    "nginx": {
+                        "configured": nginx.as_ref().is_some_and(|manager| manager.config_dir().is_some()),
+                        "config_dir": nginx.as_ref().and_then(|manager| manager.config_dir()).map(|path| path.display().to_string()),
+                        "binary": nginx.as_ref().and_then(|manager| manager.binary()).map(|path| path.display().to_string()),
+                        "error": nginx_error
+                    },
+                    "sites": rows
+                }),
+            )
+        }
         Err(error) => {
             error!(error = %error, "failed to list sites");
             json_response(
@@ -640,6 +717,144 @@ pub(crate) async fn admin_list_sites(
             )
         }
     }
+}
+
+pub(crate) async fn admin_nginx_scan(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let input: AdminNginxScanInput = match admin_input(request).await {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    let sites = {
+        let mut manager = match state.nginx.lock() {
+            Ok(manager) => manager,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"message":"Nginx 扫描状态不可用"}),
+                )
+            }
+        };
+        if let Err(error) = manager.configure(input.config_dir.clone(), input.binary.clone()) {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"message":error.to_string()}),
+            );
+        }
+        if let Err(error) = state
+            .storage
+            .set_setting("nginx.config_dir", &input.config_dir)
+        {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":format!("无法保存 Nginx 配置目录: {error}")}),
+            );
+        }
+        if let Err(error) = state
+            .storage
+            .set_setting("nginx.binary", input.binary.as_deref().unwrap_or(""))
+        {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":format!("无法保存 Nginx 程序路径: {error}")}),
+            );
+        }
+        match manager.scan() {
+            Ok(sites) => sites,
+            Err(error) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({"message":error.to_string()}),
+                )
+            }
+        }
+    };
+    if let Err(error) = sync_nginx_sites(&state, &sites) {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":format!("Nginx 站点同步失败: {error}")}),
+        );
+    }
+    json_response(StatusCode::OK, serde_json::json!({"sites":sites}))
+}
+
+pub(crate) async fn admin_nginx_pick(
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    match crate::nginx::pick_directory() {
+        Ok(Some(path)) => json_response(StatusCode::OK, serde_json::json!({"path":path})),
+        Ok(None) => json_response(StatusCode::OK, serde_json::json!({"path":null})),
+        Err(error) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"message":error.to_string()}),
+        ),
+    }
+}
+
+pub(crate) async fn admin_nginx_toggle(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let input: AdminNginxToggleInput = match admin_input(request).await {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    let gateway = state.gateway.status().await;
+    if !gateway.running {
+        return json_response(
+            StatusCode::CONFLICT,
+            serde_json::json!({"message":"请先启动 Bot Gate 网关，再接管 Nginx 站点"}),
+        );
+    }
+    let site = {
+        let mut manager = match state.nginx.lock() {
+            Ok(manager) => manager,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"message":"Nginx 扫描状态不可用"}),
+                )
+            }
+        };
+        match manager.set_protected(&input.id, input.protected, &gateway.http_listen) {
+            Ok(site) => site,
+            Err(error) => {
+                return json_response(
+                    StatusCode::BAD_GATEWAY,
+                    serde_json::json!({"message":error.to_string()}),
+                )
+            }
+        }
+    };
+    if let Err(error) = state
+        .storage
+        .upsert_site(&ManagedSite {
+            host: site.host.clone(),
+            target: site.target.clone(),
+            policy: default_policy(),
+            enabled: site.protected,
+        })
+        .and_then(|_| refresh_managed_runtime(&state))
+    {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":format!("Nginx 状态已修改但运行路由同步失败: {error}")}),
+        );
+    }
+    json_response(StatusCode::OK, serde_json::json!({"site":site}))
 }
 
 pub(crate) async fn admin_save_site(

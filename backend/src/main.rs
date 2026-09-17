@@ -16,6 +16,7 @@ mod config;
 mod gateway;
 mod http;
 mod license;
+mod nginx;
 mod proxy;
 mod security;
 mod storage;
@@ -30,9 +31,9 @@ use admin::{
     admin_delete_ban, admin_delete_site, admin_delete_whitelist, admin_gateway_start,
     admin_gateway_status, admin_gateway_stop, admin_interception_detail, admin_list_bans,
     admin_list_challenges, admin_list_interceptions, admin_list_requests, admin_list_sites,
-    admin_list_whitelist, admin_page, admin_reload_config, admin_request_detail, admin_save_ban,
-    admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site, admin_update_apply,
-    admin_update_check,
+    admin_list_whitelist, admin_nginx_pick, admin_nginx_scan, admin_nginx_toggle, admin_page,
+    admin_reload_config, admin_request_detail, admin_save_ban, admin_save_site,
+    admin_save_whitelist, admin_system, admin_toggle_site, admin_update_apply, admin_update_check,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -56,6 +57,7 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use ipnet::IpNet;
+use nginx::NginxManager;
 use proxy::{header_bytes, https_redirect_response, proxy_request};
 use security::{BanEntry, SecurityState, WhitelistRule};
 use storage::{ManagedSite, ManagedWhitelist, RequestLog, SecurityEvent, Storage};
@@ -208,6 +210,7 @@ struct AdminState {
     config_path: PathBuf,
     tls_config: Option<RustlsConfig>,
     gateway: Arc<GatewayController>,
+    nginx: Arc<Mutex<NginxManager>>,
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -812,12 +815,17 @@ async fn run() -> Result<()> {
         body_limit,
     );
     let admin_state = if config.admin.enabled {
+        let nginx = NginxManager::new(
+            state.storage.get_setting("nginx.config_dir").ok().flatten(),
+            state.storage.get_setting("nginx.binary").ok().flatten(),
+        );
         Some(Arc::new(AdminState {
             storage: state.storage.clone(),
             public_state: state.clone(),
             config_path: config_path.clone(),
             tls_config: tls_config.clone(),
             gateway: gateway.clone(),
+            nginx: Arc::new(Mutex::new(nginx)),
         }))
     } else {
         None
@@ -858,6 +866,9 @@ async fn run() -> Result<()> {
             .route("/api/sites", get(admin_list_sites).post(admin_save_site))
             .route("/api/sites/toggle", post(admin_toggle_site))
             .route("/api/sites/delete", post(admin_delete_site))
+            .route("/api/nginx/scan", post(admin_nginx_scan))
+            .route("/api/nginx/pick", post(admin_nginx_pick))
+            .route("/api/nginx/toggle", post(admin_nginx_toggle))
             .route("/api/bans", get(admin_list_bans).post(admin_save_ban))
             .route("/api/bans/delete", post(admin_delete_ban))
             .route(

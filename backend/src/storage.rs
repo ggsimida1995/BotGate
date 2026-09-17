@@ -471,6 +471,27 @@ impl Storage {
         self.database.is_some()
     }
 
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        let connection = self.management_connection()?;
+        connection
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .context("failed to load management setting")
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        let connection = self.management_connection()?;
+        connection.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, unix_now() as i64],
+        )?;
+        Ok(())
+    }
+
     pub fn bootstrap_management(
         &self,
         sites: &[ManagedSite],

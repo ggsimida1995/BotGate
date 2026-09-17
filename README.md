@@ -100,6 +100,16 @@ server {
 
 Nginx must proxy to Bot Gate, not directly to the application port. Otherwise requests bypass Browser Challenge entirely.
 
+### One-click Nginx discovery and protection
+
+The management dashboard can configure this without manually editing every server block:
+
+1. Open **站点路由 → 接入 Nginx** and select the Nginx install directory or its `conf` directory. If `nginx` is not on `PATH`, enter the `nginx.exe`/`nginx` path too.
+2. Bot Gate scans `nginx.conf` and `*.conf` files below that directory and lists discovered `server_name`/`proxy_pass` sites.
+3. Click the protection icon for a site. Bot Gate backs up its config as `.botgate.bak`, changes that site's `proxy_pass` to the running gateway, preserves the original `Host`, runs `nginx -t`, and reloads Nginx. Turning protection off restores the original upstream from the backup.
+
+Only ordinary fixed-URL `proxy_pass http://...` blocks are changed automatically. Static `root` sites, variable upstreams, and unsupported directives remain visible but must be configured manually. The scanner does not modify files until protection is explicitly enabled.
+
 ## Management dashboard
 
 With `[admin] enabled = true`, open `http://127.0.0.1:9090`. The dashboard and management JSON APIs are loopback-only and intentionally do not have a password login. Available endpoints are:
