@@ -292,7 +292,7 @@ function AdminConsole() {
     { title: '策略', dataIndex: 'policy', key: 'policy', render: (value) => <Tag>{value}</Tag> },
     { title: '保护状态', dataIndex: 'enabled', key: 'enabled', render: (value) => <Tag color={value ? 'success' : 'default'}>{value ? '保护中' : '已暂停，直连'}</Tag> },
     { title: '操作', key: 'action', render: (_, row) => <Space size="small">
-      <Tooltip title={caddyEnabled ? (row.enabled ? '暂停保护' : '恢复保护') : '请在 backend/config.toml 启用 caddy'}>
+      <Tooltip title={caddyEnabled ? (row.enabled ? '暂停保护' : '恢复保护') : 'Caddy 自动切换未启用；使用 Nginx 时请手动维护 proxy_pass'}>
         <Button type="link" disabled={!caddyEnabled} aria-label={row.enabled ? '暂停保护' : '恢复保护'} icon={row.enabled ? <PauseCircleOutlined /> : <UnlockOutlined />} onClick={() => toggleSite(row)} />
       </Tooltip>
       <Tooltip title="删除站点"><Button danger type="link" aria-label="删除站点" icon={<DeleteOutlined />} onClick={() => deleteSite(row.host)} /></Tooltip>
@@ -369,7 +369,7 @@ function AdminConsole() {
                 children: (
                   <div className="management-panel">
                     <div className="management-panel-head">
-                      <SectionTitle icon={<GlobalOutlined />} title="站点路由" description={`${sites.length} 个站点正在管理 · ${caddyEnabled ? 'Caddy 接管已启用' : 'Caddy 接管未启用'}`} />
+                      <SectionTitle icon={<GlobalOutlined />} title="站点路由" description={`${sites.length} 个站点正在管理 · ${caddyEnabled ? 'Caddy 接管已启用' : '外部代理手动接入'}`} />
                       <Button type="primary" icon={<PlusOutlined />} onClick={() => openAddModal('site')}>添加站点</Button>
                     </div>
                     <Table rowKey="host" loading={loading} columns={siteColumns} dataSource={sites} pagination={{ pageSize: 8 }} />

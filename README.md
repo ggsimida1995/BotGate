@@ -68,15 +68,37 @@ policy = "normal"
 enabled = true
 ```
 
-`enabled = true` means Browser Challenge protection is active. With Caddy integration enabled, the management dashboard can pause this site; `enabled = false` then switches it to a direct upstream route.
+`enabled = true` means Browser Challenge protection is active. The optional Caddy integration can switch routes from the dashboard; leave it disabled when Nginx is your reverse proxy.
 
 Keep `verification.enabled = true` to require the Browser Challenge. `verification.cookie_ttl` controls the signed-cookie lifetime; `verification.challenge_ttl` controls how long a pending challenge is valid. Keep `verification.secret_file` on local storage and do not delete it while the service is running, or all existing cookies become invalid.
 
 The default upstream policy accepts local loopback/private targets and local DNS names. DNS targets are resolved on every request and are still accepted only when they resolve to a loopback, private, or link-local address; public addresses are rejected. Set either option to `false` when a stricter deployment policy is required.
 
-## Existing HTTPS server (Caddy/ServBay)
+## Existing HTTPS server (Nginx/Caddy/ServBay)
 
 If another local server already owns ports 80/443, `https://cool.com/` will bypass Bot Gate unless that server forwards the `cool.com` virtual host to Bot Gate first. Configure the HTTPS virtual host (through the server's normal management UI) to reverse-proxy to `127.0.0.1:8080` and preserve the original `Host`; do not proxy it directly to the application on port `3000`. Otherwise use the direct Bot Gate URL `http://cool.com:8080/` for testing. Letting Bot Gate terminate TLS on port 443 is the alternative, but the existing HTTPS server must then release that port.
+
+For Nginx on Windows, leave `[caddy].enabled = false` and point each protected server block at the Bot Gate gateway listener:
+
+```nginx
+server {
+    listen 80;
+    server_name cool.com;
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+    }
+}
+```
+
+Nginx must proxy to Bot Gate, not directly to the application port. Otherwise requests bypass Browser Challenge entirely.
 
 ## Management dashboard
 
@@ -112,7 +134,7 @@ When licensing is enabled, an unlicensed or expired public request receives `402
 
 ### Pause protection without stopping the application
 
-When Caddy owns the public domain, enable the optional `[caddy]` section in `backend/config.toml`. The dashboard can then pause or resume protection for each configured site. Pausing switches that Caddy route to the site's upstream; the application remains available even after Bot Gate is stopped. Resuming switches the route back to `127.0.0.1:8080`, so the Browser Challenge is required again. ServBay uses its Unix admin socket; standard Caddy uses `http://127.0.0.1:2019`.
+When Caddy owns the public domain, enable the optional `[caddy]` section in `backend/config.toml`. The dashboard can then pause or resume protection for each configured site. Nginx does not use this section; leave it disabled and keep Nginx pointed at Bot Gate. Pausing protection through an external proxy is an explicit direct-upstream bypass and should only be done deliberately.
 
 This is an explicit operator action. Bot Gate remains fail-closed when it crashes or is stopped while protection is enabled.
 

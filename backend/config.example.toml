@@ -84,6 +84,7 @@ file = "data/license.key"
 [caddy]
 # Enable this when Caddy owns the public domain and should switch its route
 # between Bot Gate and the configured upstream from the admin UI.
+# Leave disabled when Nginx (or another reverse proxy) is in front.
 enabled = false
 admin_api = "http://127.0.0.1:2019"
 server = "srv0"
