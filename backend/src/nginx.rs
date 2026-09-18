@@ -42,6 +42,7 @@ pub(crate) struct NginxManager {
     binary: Option<PathBuf>,
     sites: HashMap<String, SiteRef>,
     ignored_hosts: HashSet<String>,
+    last_scan_file_count: usize,
 }
 
 impl NginxManager {
@@ -55,6 +56,7 @@ impl NginxManager {
                 .map(PathBuf::from),
             sites: HashMap::new(),
             ignored_hosts: HashSet::new(),
+            last_scan_file_count: 0,
         }
     }
 
@@ -64,6 +66,10 @@ impl NginxManager {
 
     pub(crate) fn ignored_hosts(&self) -> Vec<String> {
         self.ignored_hosts.iter().cloned().collect()
+    }
+
+    pub(crate) fn last_scan_file_count(&self) -> usize {
+        self.last_scan_file_count
     }
 
     pub(crate) fn config_dir(&self) -> Option<&Path> {
@@ -104,10 +110,18 @@ impl NginxManager {
                 files.push(main_config.clone());
             }
             collect_included_files(&prefix_dir, &mut files)?;
+            for file in self.effective_config_files(&prefix_dir, &main_config) {
+                if file.is_file() && !files.contains(&file) {
+                    files.push(file);
+                }
+            }
         }
+        files.sort();
+        files.dedup();
         if files.is_empty() {
             bail!("目录中没有找到 nginx.conf 或 *.conf 文件");
         }
+        self.last_scan_file_count = files.len();
 
         let mut refs = HashMap::new();
         for file in files {
@@ -322,6 +336,29 @@ impl NginxManager {
         }
         PathBuf::from("nginx")
     }
+
+    fn effective_config_files(&self, prefix_dir: &Path, config: &Path) -> Vec<PathBuf> {
+        let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
+        let output = match Command::new(self.binary_path())
+            .args(["-p"])
+            .arg(prefix_dir)
+            .args(["-T", "-c"])
+            .arg(relative_config)
+            .output()
+        {
+            // `nginx -T` writes parsed files before some configuration errors.
+            // Those paths are still useful when the selected directory relies on
+            // includes outside the directory itself.
+            Ok(output) => output,
+            _ => return Vec::new(),
+        };
+        let dump = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        dumped_config_files(&dump)
+    }
 }
 
 pub(crate) fn pick_directory() -> Result<Option<String>> {
@@ -369,6 +406,13 @@ pub(crate) fn pick_directory() -> Result<Option<String>> {
 
 #[cfg(target_os = "windows")]
 fn windows_pick_directory() -> Result<Option<String>> {
+    std::thread::spawn(windows_pick_directory_sta)
+        .join()
+        .map_err(|_| anyhow::anyhow!("Windows 文件夹选择器线程异常退出"))?
+}
+
+#[cfg(target_os = "windows")]
+fn windows_pick_directory_sta() -> Result<Option<String>> {
     use std::{ffi::c_void, ptr};
 
     #[repr(C)]
@@ -398,11 +442,18 @@ fn windows_pick_directory() -> Result<Option<String>> {
 
     #[link(name = "ole32")]
     extern "system" {
+        fn CoInitializeEx(reserved: *const c_void, flags: u32) -> i32;
         fn CoTaskMemFree(value: *const c_void);
+        fn CoUninitialize();
     }
 
+    const COINIT_APARTMENTTHREADED: u32 = 0x2;
     const BIF_RETURNONLYFSDIRS: u32 = 0x0001;
     const BIF_NEWDIALOGSTYLE: u32 = 0x0040;
+    let com_result = unsafe { CoInitializeEx(ptr::null(), COINIT_APARTMENTTHREADED) };
+    if com_result < 0 {
+        bail!("无法初始化 Windows 文件夹选择器 ({com_result:#x})");
+    }
     let title: Vec<u16> = "选择 Nginx 配置目录"
         .encode_utf16()
         .chain(std::iter::once(0))
@@ -420,11 +471,13 @@ fn windows_pick_directory() -> Result<Option<String>> {
     };
     let item = unsafe { SHBrowseForFolderW(&info) };
     if item.is_null() {
+        unsafe { CoUninitialize() };
         return Ok(None);
     }
     let mut path = vec![0u16; 32_768];
     let selected = unsafe { SHGetPathFromIDListW(item, path.as_mut_ptr()) != 0 };
     unsafe { CoTaskMemFree(item.cast()) };
+    unsafe { CoUninitialize() };
     if !selected {
         return Ok(None);
     }
@@ -520,6 +573,15 @@ fn collect_included_files(prefix: &Path, files: &mut Vec<PathBuf>) -> Result<()>
         }
     }
     Ok(())
+}
+
+fn dumped_config_files(output: &str) -> Vec<PathBuf> {
+    output
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("# configuration file "))
+        .filter_map(|path| path.strip_suffix(':'))
+        .map(PathBuf::from)
+        .collect()
 }
 
 fn include_patterns(source: &str) -> Vec<String> {
@@ -669,25 +731,36 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
 fn server_names(block: &[&str]) -> Vec<String> {
     block
         .iter()
-        .filter_map(|line| {
-            let line = without_comment(line).trim();
-            line.strip_prefix("server_name ")
-        })
-        .flat_map(|value| value.trim_end_matches(';').split_whitespace())
+        .filter_map(|line| directive_value(without_comment(line), "server_name"))
+        .flat_map(|value| value.split_whitespace())
         .filter(|host| *host != "_" && !host.starts_with('$') && !host.contains('*'))
         .map(str::to_ascii_lowercase)
         .collect()
 }
 
 fn parse_proxy_pass(line: &str) -> Option<String> {
-    let line = line.trim();
-    let value = line.strip_prefix("proxy_pass ")?;
-    let target = value
-        .trim()
-        .trim_end_matches(';')
+    let target = directive_value(line, "proxy_pass")?
         .split_whitespace()
         .next()?;
     Some(target.to_string())
+}
+
+fn directive_value<'a>(line: &'a str, directive: &str) -> Option<&'a str> {
+    let offset = line.find(directive)?;
+    if offset > 0
+        && !line[..offset]
+            .chars()
+            .last()
+            .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '{' | '}' | ';'))
+    {
+        return None;
+    }
+    let value = &line[offset + directive.len()..];
+    if !value.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let value = value.trim_start();
+    Some(value.split(';').next().unwrap_or(value).trim())
 }
 
 fn is_server_start(line: &str) -> bool {
@@ -828,6 +901,30 @@ mod tests {
         assert!(wildcard_match("*.conf", "site.conf"));
         assert!(wildcard_match("conf?.d", "conf1.d"));
         assert!(!wildcard_match("*.conf", "site.conf.bak"));
+    }
+
+    #[test]
+    fn parses_nginx_effective_config_markers_and_inline_directives() {
+        let files = dumped_config_files(
+            "nginx: configuration file /etc/nginx/nginx.conf test is successful\n\
+             # configuration file /etc/nginx/nginx.conf:\n\
+             # configuration file /etc/nginx/sites-enabled/cool.conf:\n",
+        );
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("/etc/nginx/nginx.conf"),
+                PathBuf::from("/etc/nginx/sites-enabled/cool.conf"),
+            ]
+        );
+
+        let sites = parse_file(
+            Path::new("cool.conf"),
+            "server { server_name cool.test; location / { proxy_pass http://127.0.0.1:3000; } }",
+        );
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].host, "cool.test");
+        assert_eq!(sites[0].target, "http://127.0.0.1:3000");
     }
 
     #[test]

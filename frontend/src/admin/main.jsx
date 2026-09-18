@@ -82,9 +82,11 @@ function AdminConsole() {
   const [logModal, setLogModal] = useState(null);
   const [addModal, setAddModal] = useState(null);
   const [nginxModal, setNginxModal] = useState(false);
+  const [nginxScanLoading, setNginxScanLoading] = useState(false);
   const [licenseModal, setLicenseModal] = useState(false);
   const [updateModal, setUpdateModal] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateError, setUpdateError] = useState('');
   const [updateLoading, setUpdateLoading] = useState(false);
   const [updateProgress, setUpdateProgress] = useState({ status: 'idle', percent: 0, message: '' });
   const [autoUpdateChecked, setAutoUpdateChecked] = useState(false);
@@ -124,7 +126,11 @@ function AdminConsole() {
   }
 
   async function checkForUpdates(silent = false) {
+    setUpdateError('');
     if (!systemInfo.update_enabled || !systemInfo.release_url) {
+      setUpdateInfo({ update_available: false, current_version: systemInfo.version, latest_version: systemInfo.version });
+      setUpdateError('尚未配置 GitHub Release 更新地址');
+      if (!silent) setUpdateModal(true);
       if (!silent) message.info('尚未配置 GitHub Release 更新地址');
       return;
     }
@@ -140,6 +146,8 @@ function AdminConsole() {
         if (!silent) message.success(`当前已是最新版本 v${update.current_version}`);
       }
     } catch (cause) {
+      setUpdateError(cause.message);
+      if (!silent) setUpdateModal(true);
       if (!silent) message.error(cause.message);
     } finally {
       setUpdateLoading(false);
@@ -242,24 +250,37 @@ function AdminConsole() {
   }
 
   async function pickNginxDirectory() {
+    setNginxScanLoading(true);
     try {
       const result = await api('/api/nginx/pick', { method: 'POST' });
       if (result.path) {
         nginxForm.setFieldValue('config_dir', result.path);
+      } else {
+        message.info('已取消选择目录');
       }
     } catch (cause) {
       message.error(cause.message);
+    } finally {
+      setNginxScanLoading(false);
     }
   }
 
   async function scanNginx(values) {
+    setNginxScanLoading(true);
     try {
-      await api('/api/nginx/scan', { method: 'POST', body: JSON.stringify(values) });
+      const result = await api('/api/nginx/scan', { method: 'POST', body: JSON.stringify(values) });
       setNginxModal(false);
-      message.success('Nginx 站点扫描完成');
+      const count = result.sites?.length || 0;
+      if (count) {
+        message.success(`Nginx 扫描完成：发现 ${count} 个站点，读取 ${result.scanned_files || 0} 个配置文件`);
+      } else {
+        message.warning(`未发现可管理站点，已读取 ${result.scanned_files || 0} 个配置文件`);
+      }
       await refresh();
     } catch (cause) {
       message.error(cause.message);
+    } finally {
+      setNginxScanLoading(false);
     }
   }
 
@@ -537,12 +558,13 @@ function AdminConsole() {
           title="接入 Nginx"
           okText="扫描站点"
           cancelText="取消"
+          confirmLoading={nginxScanLoading}
           onCancel={() => setNginxModal(false)}
           onOk={() => nginxForm.submit()}
         >
-          <Form form={nginxForm} layout="vertical" onFinish={scanNginx}>
+          <Form form={nginxForm} layout="vertical" onFinish={scanNginx} onFinishFailed={() => message.warning('请选择或输入有效的 Nginx 目录')}>
             <Form.Item name="config_dir" label="Nginx 安装或配置目录" rules={[{ required: true, message: '请选择或输入 Nginx 目录' }]}>
-              <Input.Search placeholder="例如 C:\\nginx 或 /etc/nginx" enterButton="选择" onSearch={pickNginxDirectory} />
+              <Input.Search placeholder="例如 C:\\nginx 或 /etc/nginx" enterButton="选择" loading={nginxScanLoading} onSearch={pickNginxDirectory} />
             </Form.Item>
             <Form.Item name="binary" label="Nginx 程序路径（可选）">
               <Input placeholder="留空则自动查找 nginx.exe 或 nginx" />
@@ -568,17 +590,19 @@ function AdminConsole() {
         <Modal
           open={updateModal}
           centered
-          title={updateInfo?.update_available ? '发现新版本' : '检查更新'}
-          okText={updateInfo?.update_available ? (updateProgress.status === 'failed' ? '重新下载' : ['checking', 'downloading', 'restarting'].includes(updateProgress.status) ? '更新中' : '下载并安装') : '关闭'}
+          title={updateError ? '检查更新失败' : updateInfo?.update_available ? '发现新版本' : '检查更新'}
+          okText={updateError || !updateInfo?.update_available ? '关闭' : (updateProgress.status === 'failed' ? '重新下载' : ['checking', 'downloading', 'restarting'].includes(updateProgress.status) ? '更新中' : '下载并安装')}
           cancelText="暂不更新"
           confirmLoading={updateLoading}
-          okButtonProps={{ type: 'primary', disabled: updateInfo?.update_available && ['checking', 'downloading', 'restarting'].includes(updateProgress.status) }}
-          onOk={updateInfo?.update_available ? applyUpdate : () => setUpdateModal(false)}
+          okButtonProps={{ type: 'primary', disabled: !updateError && updateInfo?.update_available && ['checking', 'downloading', 'restarting'].includes(updateProgress.status) }}
+          onOk={updateError || !updateInfo?.update_available ? () => setUpdateModal(false) : applyUpdate}
           onCancel={() => setUpdateModal(false)}
         >
-          <p>当前版本：v{updateInfo?.current_version}</p>
-          <p>最新版本：v{updateInfo?.latest_version}</p>
-          {updateInfo?.update_available ? (
+          {updateError ? <Alert type="error" showIcon message={updateError} /> : <>
+            <p>当前版本：v{updateInfo?.current_version}</p>
+            <p>最新版本：v{updateInfo?.latest_version}</p>
+          </>}
+          {!updateError && updateInfo?.update_available ? (
             <>
               <Alert
                 type="info"
@@ -594,7 +618,7 @@ function AdminConsole() {
               {updateProgress.message && <Text type={updateProgress.status === 'failed' ? 'danger' : 'secondary'}>{updateProgress.message}</Text>}
               <p>配置文件、许可证和运行数据会被保留。</p>
             </>
-          ) : <Alert type="success" showIcon message={`当前已是最新版本 v${updateInfo?.current_version || systemInfo.version}`} />}
+          ) : !updateError && <Alert type="success" showIcon message={`当前已是最新版本 v${updateInfo?.current_version || systemInfo.version}`} />}
         </Modal>
       </Content>
       <footer className="admin-footer">

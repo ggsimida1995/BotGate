@@ -781,57 +781,63 @@ pub(crate) async fn admin_nginx_scan(
         Ok(input) => input,
         Err(response) => return *response,
     };
-    let sites = {
-        let mut manager = match state.nginx.lock() {
+    let config_dir = input.config_dir.trim().to_string();
+    let binary = input.binary.clone();
+    let nginx = state.nginx.clone();
+    let scan = tokio::task::spawn_blocking(move || {
+        let mut manager = match nginx.lock() {
             Ok(manager) => manager,
-            Err(_) => {
-                return json_response(
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    serde_json::json!({"message":"Nginx 扫描状态不可用"}),
-                )
-            }
+            Err(_) => bail!("Nginx 扫描状态不可用"),
         };
-        if let Err(error) = manager.configure(input.config_dir.clone(), input.binary.clone()) {
+        manager.configure(config_dir, binary)?;
+        let sites = manager.scan()?;
+        Ok::<_, anyhow::Error>((sites, manager.last_scan_file_count()))
+    })
+    .await;
+    let (sites, scanned_files) = match scan {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
             return json_response(
                 StatusCode::BAD_REQUEST,
                 serde_json::json!({"message":error.to_string()}),
-            );
+            )
         }
-        if let Err(error) = state
-            .storage
-            .set_setting("nginx.config_dir", &input.config_dir)
-        {
+        Err(error) => {
+            error!(error = %error, "Nginx scan task failed");
             return json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"message":format!("无法保存 Nginx 配置目录: {error}")}),
+                serde_json::json!({"message":"Nginx 扫描任务异常退出"}),
             );
-        }
-        if let Err(error) = state
-            .storage
-            .set_setting("nginx.binary", input.binary.as_deref().unwrap_or(""))
-        {
-            return json_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"message":format!("无法保存 Nginx 程序路径: {error}")}),
-            );
-        }
-        match manager.scan() {
-            Ok(sites) => sites,
-            Err(error) => {
-                return json_response(
-                    StatusCode::BAD_REQUEST,
-                    serde_json::json!({"message":error.to_string()}),
-                )
-            }
         }
     };
+    if let Err(error) = state
+        .storage
+        .set_setting("nginx.config_dir", &input.config_dir)
+    {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":format!("无法保存 Nginx 配置目录: {error}")}),
+        );
+    }
+    if let Err(error) = state
+        .storage
+        .set_setting("nginx.binary", input.binary.as_deref().unwrap_or(""))
+    {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":format!("无法保存 Nginx 程序路径: {error}")}),
+        );
+    }
     if let Err(error) = sync_nginx_sites(&state, &sites) {
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"message":format!("Nginx 站点同步失败: {error}")}),
         );
     }
-    json_response(StatusCode::OK, serde_json::json!({"sites":sites}))
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"sites":sites,"scanned_files":scanned_files}),
+    )
 }
 
 pub(crate) async fn admin_nginx_pick(
@@ -840,13 +846,21 @@ pub(crate) async fn admin_nginx_pick(
     if let Some(response) = admin_access(remote) {
         return response;
     }
-    match crate::nginx::pick_directory() {
-        Ok(Some(path)) => json_response(StatusCode::OK, serde_json::json!({"path":path})),
-        Ok(None) => json_response(StatusCode::OK, serde_json::json!({"path":null})),
-        Err(error) => json_response(
+    let picker = tokio::task::spawn_blocking(crate::nginx::pick_directory).await;
+    match picker {
+        Ok(Ok(Some(path))) => json_response(StatusCode::OK, serde_json::json!({"path":path})),
+        Ok(Ok(None)) => json_response(StatusCode::OK, serde_json::json!({"path":null})),
+        Ok(Err(error)) => json_response(
             StatusCode::BAD_REQUEST,
             serde_json::json!({"message":error.to_string()}),
         ),
+        Err(error) => {
+            error!(error = %error, "Nginx directory picker task failed");
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Windows 文件夹选择器异常退出"}),
+            )
+        }
     }
 }
 
