@@ -2,12 +2,13 @@ use std::{
     env,
     path::{Path, PathBuf},
     process::Command,
+    sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{bail, Context, Result};
 use reqwest::Url;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::config::UpdateConfig;
@@ -24,6 +25,7 @@ pub(crate) struct UpdateCheck {
     pub(crate) latest_version: String,
     pub(crate) update_available: bool,
     pub(crate) release_page: String,
+    pub(crate) release_notes: String,
     pub(crate) asset: Option<UpdateAsset>,
 }
 
@@ -44,9 +46,33 @@ struct GithubAsset {
 struct ReleaseSelection {
     latest_version: String,
     release_page: String,
+    release_notes: String,
     asset: GithubAsset,
     checksum: GithubAsset,
 }
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct UpdateProgress {
+    pub(crate) status: String,
+    pub(crate) percent: u8,
+    pub(crate) message: String,
+    pub(crate) latest_version: Option<String>,
+    pub(crate) release_notes: Option<String>,
+}
+
+impl Default for UpdateProgress {
+    fn default() -> Self {
+        Self {
+            status: "idle".to_string(),
+            percent: 0,
+            message: String::new(),
+            latest_version: None,
+            release_notes: None,
+        }
+    }
+}
+
+pub(crate) type UpdateProgressState = Arc<Mutex<UpdateProgress>>;
 
 pub(crate) async fn check(config: &UpdateConfig, current_version: &str) -> Result<UpdateCheck> {
     if !config.enabled {
@@ -58,6 +84,7 @@ pub(crate) async fn check(config: &UpdateConfig, current_version: &str) -> Resul
         update_available: is_newer_version(&selection.latest_version, current_version),
         latest_version: selection.latest_version,
         release_page: selection.release_page,
+        release_notes: selection.release_notes,
         asset: Some(UpdateAsset {
             name: selection.asset.name,
             size: selection.asset.size,
@@ -65,7 +92,24 @@ pub(crate) async fn check(config: &UpdateConfig, current_version: &str) -> Resul
     })
 }
 
-pub(crate) async fn apply(config: &UpdateConfig, current_version: &str) -> Result<UpdateApply> {
+pub(crate) async fn apply(
+    config: &UpdateConfig,
+    current_version: &str,
+    progress: UpdateProgressState,
+) -> Result<UpdateApply> {
+    set_progress(&progress, "checking", 0, "正在检查最新版本", None, None);
+    let result = apply_inner(config, current_version, &progress).await;
+    if let Err(error) = &result {
+        mark_failed(&progress, &error.to_string());
+    }
+    result
+}
+
+async fn apply_inner(
+    config: &UpdateConfig,
+    current_version: &str,
+    progress: &UpdateProgressState,
+) -> Result<UpdateApply> {
     if !config.enabled {
         bail!("在线更新已禁用");
     }
@@ -74,6 +118,14 @@ pub(crate) async fn apply(config: &UpdateConfig, current_version: &str) -> Resul
     if !is_newer_version(&latest_version, current_version) {
         bail!("当前已是最新版本 v{current_version}");
     }
+    set_progress(
+        progress,
+        "downloading",
+        5,
+        "已找到新版本，准备下载",
+        Some(latest_version.clone()),
+        Some(selection.release_notes.clone()),
+    );
 
     let client = client()?;
     let temp_dir = update_temp_dir()?;
@@ -86,15 +138,31 @@ pub(crate) async fn apply(config: &UpdateConfig, current_version: &str) -> Resul
         &client,
         &selection.asset.browser_download_url,
         &package_path,
+        progress,
+        10,
+        75,
+        "正在下载更新包",
     )
     .await?;
     let checksum = download(
         &client,
         &selection.checksum.browser_download_url,
         &checksum_path,
+        progress,
+        75,
+        90,
+        "正在校验更新包",
     )
     .await?;
     verify_sha256(&package, &checksum)?;
+    set_progress(
+        progress,
+        "restarting",
+        95,
+        "更新包校验完成，正在重启应用",
+        Some(latest_version.clone()),
+        Some(selection.release_notes.clone()),
+    );
     schedule_platform_update(&temp_dir, &selection.asset.name).await?;
 
     Ok(UpdateApply {
@@ -112,29 +180,45 @@ async fn load_selection(release_url: &str) -> Result<ReleaseSelection> {
     let release_url = https_url(release_url, "Release 地址")?;
     let (owner, repository) = github_repository(&release_url)
         .context("Release 地址必须指向 GitHub 仓库的 latest release")?;
-    let latest_page = Url::parse(&format!(
-        "https://github.com/{owner}/{repository}/releases/latest"
+    let api_url = Url::parse(&format!(
+        "https://api.github.com/repos/{owner}/{repository}/releases/latest"
     ))?;
     let response = client
-        .get(latest_page)
+        .get(api_url)
         .send()
         .await
         .context("连接 GitHub Release 失败")?;
     let status = response.status();
-    let release_page = response.url().clone();
-    response
+    let response = response
         .error_for_status()
         .with_context(|| format!("GitHub Release 返回错误 ({status})"))?;
-    let tag = github_release_tag(&release_page).context("无法识别 GitHub 最新版本")?;
+    let release: GithubRelease = response
+        .json()
+        .await
+        .context("无法读取 GitHub Release 信息")?;
+    let GithubRelease {
+        tag_name: tag,
+        html_url,
+        body,
+        assets,
+    } = release;
     let latest_version = tag.trim_start_matches('v').to_string();
     let suffix = platform_package_suffix();
     let asset_name = format!("BotGate-{latest_version}{suffix}");
     let download_base = format!("https://github.com/{owner}/{repository}/releases/download/{tag}");
-    let asset = GithubAsset {
-        browser_download_url: format!("{download_base}/{asset_name}"),
-        name: asset_name,
-        size: 0,
-    };
+    let asset = assets
+        .into_iter()
+        .find(|asset| asset.name == asset_name)
+        .map(|asset| GithubAsset {
+            browser_download_url: asset.browser_download_url,
+            name: asset.name,
+            size: asset.size,
+        })
+        .unwrap_or_else(|| GithubAsset {
+            browser_download_url: format!("{download_base}/{asset_name}"),
+            name: asset_name,
+            size: 0,
+        });
     let checksum_name = format!("{}.sha256", asset.name);
     let checksum = GithubAsset {
         browser_download_url: format!("{download_base}/{checksum_name}"),
@@ -145,10 +229,27 @@ async fn load_selection(release_url: &str) -> Result<ReleaseSelection> {
     https_url(&checksum.browser_download_url, "校验文件地址")?;
     Ok(ReleaseSelection {
         latest_version,
-        release_page: release_page.to_string(),
+        release_page: html_url,
+        release_notes: body.unwrap_or_default(),
         asset,
         checksum,
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubRelease {
+    tag_name: String,
+    html_url: String,
+    body: Option<String>,
+    #[serde(default)]
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
+    browser_download_url: String,
+    size: u64,
 }
 
 fn github_repository(url: &Url) -> Option<(String, String)> {
@@ -162,12 +263,6 @@ fn github_repository(url: &Url) -> Option<(String, String)> {
         }
         _ => None,
     }
-}
-
-fn github_release_tag(url: &Url) -> Option<String> {
-    let segments = url.path_segments()?.collect::<Vec<_>>();
-    let index = segments.iter().position(|segment| *segment == "tag")?;
-    segments.get(index + 1).map(|tag| tag.to_string())
 }
 
 fn client() -> Result<reqwest::Client> {
@@ -185,21 +280,74 @@ fn https_url(value: &str, label: &str) -> Result<Url> {
     Ok(url)
 }
 
-async fn download(client: &reqwest::Client, url: &str, path: &Path) -> Result<Vec<u8>> {
-    let body = client
+async fn download(
+    client: &reqwest::Client,
+    url: &str,
+    path: &Path,
+    progress: &UpdateProgressState,
+    start: u8,
+    end: u8,
+    message: &str,
+) -> Result<Vec<u8>> {
+    let mut response = client
         .get(https_url(url, "下载地址")?)
         .send()
         .await
         .context("下载更新文件失败")?
         .error_for_status()
-        .context("下载更新文件返回错误")?
-        .bytes()
-        .await
-        .context("读取更新文件失败")?;
+        .context("下载更新文件返回错误")?;
+    let total = response.content_length().unwrap_or(0);
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.context("读取更新文件失败")? {
+        body.extend_from_slice(&chunk);
+        let percent = if total == 0 {
+            start
+        } else {
+            start.saturating_add(
+                (((body.len() as u64).saturating_mul((end - start) as u64)) / total) as u8,
+            )
+        };
+        set_progress(
+            progress,
+            "downloading",
+            percent.min(end),
+            message,
+            None,
+            None,
+        );
+    }
     tokio::fs::write(path, &body)
         .await
         .with_context(|| format!("保存更新文件失败: {}", path.display()))?;
     Ok(body.to_vec())
+}
+
+fn set_progress(
+    progress: &UpdateProgressState,
+    status: &str,
+    percent: u8,
+    message: &str,
+    latest_version: Option<String>,
+    release_notes: Option<String>,
+) {
+    if let Ok(mut current) = progress.lock() {
+        current.status = status.to_string();
+        current.percent = percent;
+        current.message = message.to_string();
+        if latest_version.is_some() {
+            current.latest_version = latest_version;
+        }
+        if release_notes.is_some() {
+            current.release_notes = release_notes;
+        }
+    }
+}
+
+fn mark_failed(progress: &UpdateProgressState, message: &str) {
+    if let Ok(mut current) = progress.lock() {
+        current.status = "failed".to_string();
+        current.message = message.to_string();
+    }
 }
 
 fn verify_sha256(package: &[u8], checksum: &[u8]) -> Result<()> {
@@ -295,10 +443,11 @@ async fn schedule_windows_update(temp_dir: &Path, package_name: &str) -> Result<
     let installer = temp_dir.join(package_name);
     let script = temp_dir.join("update.ps1");
     let script_body = format!(
-        "$ErrorActionPreference = 'Stop'\n$parentPid = {pid}\n$deadline = (Get-Date).AddMinutes(5)\nwhile ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 500 }}\n$installerProcess = Start-Process -FilePath {installer} -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART') -PassThru -Wait\nif ($installerProcess.ExitCode -ne 0) {{ exit $installerProcess.ExitCode }}\nif (Test-Path -LiteralPath {executable}) {{ Start-Process -FilePath {executable} }}\nRemove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\n",
+        "$ErrorActionPreference = 'Stop'\n$parentPid = {pid}\n$log = Join-Path $env:TEMP 'bot-gate-update.log'\n\"Bot Gate update started $(Get-Date -Format o)\" | Set-Content -LiteralPath $log\ntry {{\n  $deadline = (Get-Date).AddMinutes(5)\n  while ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 500 }}\n  if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{ throw '旧进程在 5 分钟内没有退出' }}\n  $installerProcess = Start-Process -FilePath {installer} -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/CLOSEAPPLICATIONS','/RESTARTAPPLICATIONS') -WorkingDirectory {working_directory} -PassThru -Wait\n  if ($installerProcess.ExitCode -ne 0) {{ throw \"安装器退出码: $($installerProcess.ExitCode)\" }}\n  if (Test-Path -LiteralPath {executable}) {{ Start-Process -FilePath {executable} -WorkingDirectory {working_directory} }}\n  \"Bot Gate update completed $(Get-Date -Format o)\" | Add-Content -LiteralPath $log\n}} catch {{\n  \"Bot Gate update failed: $($_.Exception.Message)\" | Add-Content -LiteralPath $log\n  exit 1\n}} finally {{\n  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\n}}\n",
         pid = std::process::id(),
         installer = powershell_quote(&installer),
         executable = powershell_quote(&executable),
+        working_directory = powershell_quote(executable.parent().unwrap_or_else(|| Path::new("."))),
     );
     tokio::fs::write(&script, script_body)
         .await
@@ -436,7 +585,5 @@ mod tests {
             github_repository(&page),
             Some(("example".to_string(), "project".to_string()))
         );
-        let tagged = Url::parse("https://github.com/example/project/releases/tag/v1.2.3").unwrap();
-        assert_eq!(github_release_tag(&tagged).as_deref(), Some("v1.2.3"));
     }
 }

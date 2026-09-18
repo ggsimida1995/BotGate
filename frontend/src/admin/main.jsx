@@ -12,6 +12,7 @@ import {
   InputNumber,
   Layout,
   Modal,
+  Progress,
   Row,
   Space,
   Statistic,
@@ -84,6 +85,8 @@ function AdminConsole() {
   const [updateModal, setUpdateModal] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
   const [updateLoading, setUpdateLoading] = useState(false);
+  const [updateProgress, setUpdateProgress] = useState({ status: 'idle', percent: 0, message: '' });
+  const [autoUpdateChecked, setAutoUpdateChecked] = useState(false);
   const [siteForm] = Form.useForm();
   const [banForm] = Form.useForm();
   const [whitelistForm] = Form.useForm();
@@ -119,9 +122,9 @@ function AdminConsole() {
     }
   }
 
-  async function checkForUpdates() {
+  async function checkForUpdates(silent = false) {
     if (!systemInfo.update_enabled || !systemInfo.release_url) {
-      message.info('尚未配置 GitHub Release 更新地址');
+      if (!silent) message.info('尚未配置 GitHub Release 更新地址');
       return;
     }
     setUpdateLoading(true);
@@ -131,25 +134,25 @@ function AdminConsole() {
       setUpdateInfo(update);
       if (update.update_available) {
         setUpdateModal(true);
-      } else {
+      } else if (!silent) {
         message.success(`当前已是最新版本 v${update.current_version}`);
       }
     } catch (cause) {
-      message.error(cause.message);
+      if (!silent) message.error(cause.message);
     } finally {
       setUpdateLoading(false);
     }
   }
 
   async function applyUpdate() {
+    if (['checking', 'downloading', 'restarting'].includes(updateProgress.status)) return;
     setUpdateLoading(true);
     try {
-      const result = await api('/api/update/apply', {
+      await api('/api/update/apply', {
         method: 'POST',
         headers: { 'x-bot-gate-action': 'update' },
       });
-      setUpdateModal(false);
-      message.success(result.update?.message || '更新包已校验，Bot Gate 将自动重启完成更新');
+      message.success('更新已开始下载');
     } catch (cause) {
       message.error(cause.message);
     } finally {
@@ -184,6 +187,32 @@ function AdminConsole() {
   }
 
   useEffect(() => { refresh(); }, []);
+
+  useEffect(() => {
+    if (!autoUpdateChecked && systemInfo.version !== '0.1.0' && systemInfo.update_enabled) {
+      setAutoUpdateChecked(true);
+      checkForUpdates(true);
+    }
+  }, [autoUpdateChecked, systemInfo.version, systemInfo.update_enabled]);
+
+  useEffect(() => {
+    if (!updateModal) return undefined;
+    let active = true;
+    const loadProgress = async () => {
+      try {
+        const result = await api('/api/update/progress');
+        if (active && result.progress) setUpdateProgress(result.progress);
+      } catch (_) {
+        // The management endpoint can briefly disappear while the app restarts.
+      }
+    };
+    loadProgress();
+    const timer = window.setInterval(loadProgress, 700);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [updateModal]);
 
   function openAddModal(type) {
     if (type === 'site') siteForm.resetFields();
@@ -522,16 +551,27 @@ function AdminConsole() {
           open={updateModal}
           centered
           title="发现新版本"
-          okText="下载并立即更新"
+          okText={updateProgress.status === 'failed' ? '重新下载' : ['checking', 'downloading', 'restarting'].includes(updateProgress.status) ? '更新中' : '下载并安装'}
           cancelText="暂不更新"
           confirmLoading={updateLoading}
-          okButtonProps={{ type: 'primary' }}
+          okButtonProps={{ type: 'primary', disabled: ['checking', 'downloading', 'restarting'].includes(updateProgress.status) }}
           onOk={applyUpdate}
           onCancel={() => setUpdateModal(false)}
         >
           <p>当前版本：v{updateInfo?.current_version}</p>
           <p>最新版本：v{updateInfo?.latest_version}</p>
-          <p>将下载并校验 <strong>{updateInfo?.asset?.name}</strong>，随后自动关闭并重启 Bot Gate。</p>
+          <Alert
+            type="info"
+            showIcon
+            message="更新内容"
+            description={updateInfo?.release_notes ? <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto', margin: 0 }}>{updateInfo.release_notes}</pre> : '本次 Release 未填写更新说明。'}
+          />
+          <Progress
+            percent={updateProgress.percent}
+            status={updateProgress.status === 'failed' ? 'exception' : updateProgress.status === 'restarting' ? 'active' : undefined}
+            style={{ marginTop: 16 }}
+          />
+          {updateProgress.message && <Text type={updateProgress.status === 'failed' ? 'danger' : 'secondary'}>{updateProgress.message}</Text>}
           <p>配置文件、许可证和运行数据会被保留。</p>
         </Modal>
       </Content>

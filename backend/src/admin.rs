@@ -237,13 +237,52 @@ pub(crate) async fn admin_update_apply(
             serde_json::json!({"message":"invalid update request"}),
         );
     }
-    match crate::updater::apply(&state.public_state.update, APP_VERSION).await {
-        Ok(update) => json_response(StatusCode::ACCEPTED, serde_json::json!({"update": update})),
-        Err(error) => json_response(
-            StatusCode::BAD_GATEWAY,
-            serde_json::json!({"message": error.to_string()}),
-        ),
+    let update_progress = state.update_progress.clone();
+    let active = update_progress
+        .lock()
+        .map(|progress| {
+            matches!(
+                progress.status.as_str(),
+                "checking" | "downloading" | "restarting"
+            )
+        })
+        .unwrap_or(false);
+    if active {
+        return json_response(
+            StatusCode::CONFLICT,
+            serde_json::json!({"message":"更新正在进行中"}),
+        );
     }
+    if let Ok(mut progress) = update_progress.lock() {
+        *progress = crate::updater::UpdateProgress::default();
+    }
+    let update_config = state.public_state.update.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            crate::updater::apply(&update_config, APP_VERSION, update_progress).await
+        {
+            error!(error = %error, "background update failed");
+        }
+    });
+    json_response(
+        StatusCode::ACCEPTED,
+        serde_json::json!({"accepted":true,"message":"更新已开始下载"}),
+    )
+}
+
+pub(crate) async fn admin_update_progress(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let progress = state
+        .update_progress
+        .lock()
+        .map(|progress| progress.clone())
+        .unwrap_or_default();
+    json_response(StatusCode::OK, serde_json::json!({"progress": progress}))
 }
 
 pub(crate) async fn admin_gateway_status(

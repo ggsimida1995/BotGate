@@ -34,6 +34,7 @@ use admin::{
     admin_list_whitelist, admin_nginx_pick, admin_nginx_scan, admin_nginx_toggle, admin_page,
     admin_reload_config, admin_request_detail, admin_save_ban, admin_save_site,
     admin_save_whitelist, admin_system, admin_toggle_site, admin_update_apply, admin_update_check,
+    admin_update_progress,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -211,6 +212,7 @@ struct AdminState {
     tls_config: Option<RustlsConfig>,
     gateway: Arc<GatewayController>,
     nginx: Arc<Mutex<NginxManager>>,
+    update_progress: updater::UpdateProgressState,
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -826,6 +828,7 @@ async fn run() -> Result<()> {
             tls_config: tls_config.clone(),
             gateway: gateway.clone(),
             nginx: Arc::new(Mutex::new(nginx)),
+            update_progress: Arc::new(Mutex::new(updater::UpdateProgress::default())),
         }))
     } else {
         None
@@ -852,6 +855,7 @@ async fn run() -> Result<()> {
             .route("/api/system", get(admin_system))
             .route("/api/update/check", get(admin_update_check))
             .route("/api/update/apply", post(admin_update_apply))
+            .route("/api/update/progress", get(admin_update_progress))
             .route("/api/gateway/status", get(admin_gateway_status))
             .route("/api/gateway/start", post(admin_gateway_start))
             .route("/api/gateway/stop", post(admin_gateway_stop))
