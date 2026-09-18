@@ -16,6 +16,8 @@
 	<string>Bot Gate</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
 	<key>CFBundleShortVersionString</key>
 	<string>@VERSION@</string>
 	<key>CFBundleVersion</key>

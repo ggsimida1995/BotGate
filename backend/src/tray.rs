@@ -86,7 +86,7 @@ pub(crate) fn start(admin_url: String) -> Result<(TrayHandle, UnboundedReceiver<
         use tray_item::{IconSource, TrayItem};
 
         let mut tray = TrayItem::new(
-            "Bot Gate",
+            "网站卫士",
             IconSource::Data {
                 width: 1024,
                 height: 1024,
@@ -99,7 +99,7 @@ pub(crate) fn start(admin_url: String) -> Result<(TrayHandle, UnboundedReceiver<
             let _ = open_admin(&open_url);
         })
         .context("failed to create macOS management menu")?;
-        tray.inner_mut().add_quit_item("退出 Bot Gate");
+        tray.inner_mut().add_quit_item("退出网站卫士");
         Ok((
             TrayHandle {
                 tray,

@@ -5,6 +5,7 @@
 [Setup]
 AppId={{7F8D9D9B-2D86-4CC9-B8B1-2D829E5D5B6A}
 AppName=Bot Gate
+AppVerName=Bot Gate
 AppVersion={#AppVersion}
 AppPublisher=Bot Gate
 DefaultDirName={localappdata}\Programs\BotGate
