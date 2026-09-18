@@ -1,5 +1,5 @@
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{hash_map::DefaultHasher, HashMap, HashSet},
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
@@ -41,6 +41,7 @@ pub(crate) struct NginxManager {
     config_dir: Option<PathBuf>,
     binary: Option<PathBuf>,
     sites: HashMap<String, SiteRef>,
+    ignored_hosts: HashSet<String>,
 }
 
 impl NginxManager {
@@ -53,7 +54,16 @@ impl NginxManager {
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
             sites: HashMap::new(),
+            ignored_hosts: HashSet::new(),
         }
+    }
+
+    pub(crate) fn set_ignored_hosts(&mut self, hosts: HashSet<String>) {
+        self.ignored_hosts = hosts;
+    }
+
+    pub(crate) fn ignored_hosts(&self) -> Vec<String> {
+        self.ignored_hosts.iter().cloned().collect()
     }
 
     pub(crate) fn config_dir(&self) -> Option<&Path> {
@@ -68,6 +78,9 @@ impl NginxManager {
         let config_dir = PathBuf::from(config_dir.trim());
         if !config_dir.is_dir() {
             bail!("Nginx 配置目录不存在: {}", config_dir.display());
+        }
+        if self.config_dir.as_ref() != Some(&config_dir) {
+            self.ignored_hosts.clear();
         }
         self.config_dir = Some(config_dir);
         self.binary = binary
@@ -86,6 +99,12 @@ impl NginxManager {
         }
         let mut files = Vec::new();
         collect_config_files(config_dir, &mut files)?;
+        if let Some((prefix_dir, main_config)) = nginx_config_context(config_dir) {
+            if !files.contains(&main_config) {
+                files.push(main_config.clone());
+            }
+            collect_included_files(&prefix_dir, &mut files)?;
+        }
         if files.is_empty() {
             bail!("目录中没有找到 nginx.conf 或 *.conf 文件");
         }
@@ -104,6 +123,9 @@ impl NginxManager {
                 Vec::new()
             };
             for parsed in parse_file(&file, &source) {
+                if self.ignored_hosts.contains(&parsed.host) {
+                    continue;
+                }
                 let backup_target = backup_sites
                     .iter()
                     .find(|candidate| candidate.host == parsed.host)
@@ -227,6 +249,20 @@ impl NginxManager {
             .context("Nginx 配置刷新后未找到站点")
     }
 
+    pub(crate) fn remove_site(&mut self, id: &str, gateway_address: &str) -> Result<String> {
+        let site = self
+            .sites
+            .get(id)
+            .cloned()
+            .context("Nginx 站点不存在，请先重新扫描")?;
+        if site.protected {
+            self.set_protected(id, false, gateway_address)?;
+        }
+        self.ignored_hosts.insert(site.host.clone());
+        self.sites.remove(id);
+        Ok(site.host)
+    }
+
     fn test_and_reload(&self) -> Result<()> {
         let config_dir = self
             .config_dir
@@ -291,13 +327,34 @@ impl NginxManager {
 pub(crate) fn pick_directory() -> Result<Option<String>> {
     #[cfg(target_os = "windows")]
     {
-        let script = "Add-Type -AssemblyName System.Windows.Forms; $dialog = New-Object System.Windows.Forms.FolderBrowserDialog; $dialog.Description = '选择 Nginx 配置目录'; if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { $dialog.SelectedPath }";
+        let script = r#"
+Add-Type -AssemblyName System.Windows.Forms
+[System.Windows.Forms.Application]::EnableVisualStyles()
+$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
+$dialog.Description = '选择 Nginx 配置目录'
+$dialog.RootFolder = [System.Environment+SpecialFolder]::MyComputer
+$dialog.ShowNewFolderButton = $false
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+  [Console]::Out.WriteLine($dialog.SelectedPath)
+}
+"#;
         let output = Command::new("powershell.exe")
-            .args(["-NoProfile", "-STA", "-Command", script])
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-STA",
+                "-WindowStyle",
+                "Normal",
+                "-Command",
+                script,
+            ])
             .output()
             .context("无法打开 Windows 文件夹选择器")?;
         if !output.status.success() {
-            bail!("Windows 文件夹选择器执行失败");
+            let detail = command_output(&output.stdout, &output.stderr);
+            bail!("Windows 文件夹选择器执行失败: {detail}");
         }
         let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
         return Ok((!path.is_empty()).then_some(path));
@@ -385,6 +442,97 @@ fn collect_config_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn collect_included_files(prefix: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    let mut index = 0;
+    while index < files.len() && files.len() < MAX_CONFIG_FILES {
+        let file = files[index].clone();
+        index += 1;
+        let source = match fs::read_to_string(&file) {
+            Ok(source) => source,
+            Err(_) => continue,
+        };
+        for pattern in include_patterns(&source) {
+            let path = Path::new(&pattern);
+            let candidate = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                prefix.join(path)
+            };
+            for included in expand_path_pattern(&candidate) {
+                if included.is_file() && !files.contains(&included) {
+                    files.push(included);
+                    if files.len() >= MAX_CONFIG_FILES {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn include_patterns(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let line = without_comment(line).trim();
+            let rest = line.strip_prefix("include")?;
+            if !rest.chars().next().is_some_and(char::is_whitespace) {
+                return None;
+            }
+            let value = rest.trim().trim_end_matches(';');
+            (!value.is_empty()).then(|| value.trim_matches('"').trim_matches('\'').to_string())
+        })
+        .collect()
+}
+
+fn expand_path_pattern(path: &Path) -> Vec<PathBuf> {
+    let parts = path
+        .components()
+        .map(|component| component.as_os_str().to_os_string())
+        .collect::<Vec<_>>();
+    expand_path_parts(PathBuf::new(), &parts)
+}
+
+fn expand_path_parts(current: PathBuf, parts: &[std::ffi::OsString]) -> Vec<PathBuf> {
+    let Some((part, rest)) = parts.split_first() else {
+        return vec![current];
+    };
+    let part = part.to_string_lossy();
+    if part.contains(['*', '?']) {
+        let mut matches = Vec::new();
+        if let Ok(entries) = fs::read_dir(&current) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                if wildcard_match(&part, &name.to_string_lossy()) {
+                    matches.extend(expand_path_parts(entry.path(), rest));
+                }
+            }
+        }
+        matches
+    } else {
+        let mut next = current;
+        next.push(part.as_ref());
+        expand_path_parts(next, rest)
+    }
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    fn matches(pattern: &[u8], value: &[u8]) -> bool {
+        match pattern.split_first() {
+            None => value.is_empty(),
+            Some((b'*', rest)) => {
+                matches(rest, value) || value.first().is_some_and(|_| matches(pattern, &value[1..]))
+            }
+            Some((b'?', rest)) => value.first().is_some_and(|_| matches(rest, &value[1..])),
+            Some((expected, rest)) => value
+                .first()
+                .is_some_and(|actual| expected == actual && matches(rest, &value[1..])),
+        }
+    }
+    matches(pattern.as_bytes(), value.as_bytes())
 }
 
 fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
@@ -610,5 +758,16 @@ mod tests {
         assert!(sites.iter().all(|site| !site.supported));
         assert!(sites.iter().any(|site| site.host == "variable.test"));
         assert!(sites.iter().any(|site| site.host == "static.test"));
+    }
+
+    #[test]
+    fn parses_include_patterns_and_wildcards() {
+        assert_eq!(
+            include_patterns("include conf.d/*.conf; # sites\ninclude\textra.conf;"),
+            vec!["conf.d/*.conf", "extra.conf"]
+        );
+        assert!(wildcard_match("*.conf", "site.conf"));
+        assert!(wildcard_match("conf?.d", "conf1.d"));
+        assert!(!wildcard_match("*.conf", "site.conf.bak"));
     }
 }

@@ -12,6 +12,7 @@ import {
   InputNumber,
   Layout,
   Modal,
+  Popconfirm,
   Progress,
   Row,
   Space,
@@ -134,8 +135,9 @@ function AdminConsole() {
       setUpdateInfo(update);
       if (update.update_available) {
         setUpdateModal(true);
-      } else if (!silent) {
-        message.success(`当前已是最新版本 v${update.current_version}`);
+      } else {
+        if (!silent) setUpdateModal(true);
+        if (!silent) message.success(`当前已是最新版本 v${update.current_version}`);
       }
     } catch (cause) {
       if (!silent) message.error(cause.message);
@@ -337,6 +339,17 @@ function AdminConsole() {
     } catch (cause) { message.error(cause.message); }
   }
 
+  async function deleteNginxSite(row) {
+    try {
+      await api('/api/nginx/delete', {
+        method: 'POST',
+        body: JSON.stringify({ id: row.id }),
+      });
+      message.success('Nginx 站点已从 Bot Gate 列表移除，原配置已恢复直连');
+      await refresh();
+    } catch (cause) { message.error(cause.message); }
+  }
+
   async function deleteBan(ip) {
     try {
       await api('/api/bans/delete', { method: 'POST', body: JSON.stringify({ ip }) });
@@ -358,12 +371,17 @@ function AdminConsole() {
     { title: 'Upstream', dataIndex: 'target', key: 'target' },
     { title: '来源', dataIndex: 'source', key: 'source', render: (value) => value === 'nginx' ? <Tag color="blue">Nginx</Tag> : <Tag>手动</Tag> },
     { title: '策略', dataIndex: 'policy', key: 'policy', render: (value) => <Tag>{value}</Tag> },
-    { title: '保护状态', dataIndex: 'enabled', key: 'enabled', render: (value, row) => <Tag color={value ? 'success' : 'default'}>{value ? '保护中' : row.source === 'nginx' ? '未保护，直连' : '已暂停，直连'}</Tag> },
+    { title: '保护状态', dataIndex: 'enabled', key: 'enabled', render: (value, row) => <Tag color={value ? 'success' : row.source === 'nginx' && !row.supported ? 'warning' : 'default'}>{value ? '保护中' : row.source === 'nginx' && !row.supported ? '无法自动接管' : row.source === 'nginx' ? '未保护，直连' : '已暂停，直连'}</Tag> },
     { title: '操作', key: 'action', render: (_, row) => <Space size="small">
       {row.source === 'nginx' ? (
-        <Tooltip title={!row.supported ? '该站点不是标准 proxy_pass，无法自动接管' : (row.protected ? '取消保护并恢复 Nginx 直连' : '启用保护并接入 Bot Gate')}>
-          <Button type="link" disabled={!row.supported} aria-label={row.protected ? '取消保护' : '启用保护'} icon={row.protected ? <PauseCircleOutlined /> : <SafetyCertificateOutlined />} onClick={() => toggleNginxSite(row)} />
-        </Tooltip>
+        <>
+          <Tooltip title={!row.supported ? '不是标准 proxy_pass，无法自动接管' : row.protected ? '取消保护并恢复 Nginx 直连' : '启用保护并接入 Bot Gate'}>
+            <Button type="link" disabled={!row.supported} aria-label={row.protected ? '取消保护' : '启用保护'} icon={row.protected ? <PauseCircleOutlined /> : <SafetyCertificateOutlined />} onClick={() => toggleNginxSite(row)} />
+          </Tooltip>
+          <Popconfirm title="从 Bot Gate 移除此站点？" description="不会删除 Nginx 配置；受保护站点会先恢复为原 upstream。" okText="移除" cancelText="取消" onConfirm={() => deleteNginxSite(row)}>
+            <Tooltip title="移除站点"><Button danger type="link" aria-label="移除 Nginx 站点" icon={<DeleteOutlined />} /></Tooltip>
+          </Popconfirm>
+        </>
       ) : (
         <Tooltip title={caddyEnabled ? (row.enabled ? '暂停保护' : '恢复保护') : '外部代理未启用自动切换'}>
           <Button type="link" disabled={!caddyEnabled} aria-label={row.enabled ? '暂停保护' : '恢复保护'} icon={row.enabled ? <PauseCircleOutlined /> : <UnlockOutlined />} onClick={() => toggleSite(row)} />
@@ -550,29 +568,33 @@ function AdminConsole() {
         <Modal
           open={updateModal}
           centered
-          title="发现新版本"
-          okText={updateProgress.status === 'failed' ? '重新下载' : ['checking', 'downloading', 'restarting'].includes(updateProgress.status) ? '更新中' : '下载并安装'}
+          title={updateInfo?.update_available ? '发现新版本' : '检查更新'}
+          okText={updateInfo?.update_available ? (updateProgress.status === 'failed' ? '重新下载' : ['checking', 'downloading', 'restarting'].includes(updateProgress.status) ? '更新中' : '下载并安装') : '关闭'}
           cancelText="暂不更新"
           confirmLoading={updateLoading}
-          okButtonProps={{ type: 'primary', disabled: ['checking', 'downloading', 'restarting'].includes(updateProgress.status) }}
-          onOk={applyUpdate}
+          okButtonProps={{ type: 'primary', disabled: updateInfo?.update_available && ['checking', 'downloading', 'restarting'].includes(updateProgress.status) }}
+          onOk={updateInfo?.update_available ? applyUpdate : () => setUpdateModal(false)}
           onCancel={() => setUpdateModal(false)}
         >
           <p>当前版本：v{updateInfo?.current_version}</p>
           <p>最新版本：v{updateInfo?.latest_version}</p>
-          <Alert
-            type="info"
-            showIcon
-            message="更新内容"
-            description={updateInfo?.release_notes ? <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto', margin: 0 }}>{updateInfo.release_notes}</pre> : '本次 Release 未填写更新说明。'}
-          />
-          <Progress
-            percent={updateProgress.percent}
-            status={updateProgress.status === 'failed' ? 'exception' : updateProgress.status === 'restarting' ? 'active' : undefined}
-            style={{ marginTop: 16 }}
-          />
-          {updateProgress.message && <Text type={updateProgress.status === 'failed' ? 'danger' : 'secondary'}>{updateProgress.message}</Text>}
-          <p>配置文件、许可证和运行数据会被保留。</p>
+          {updateInfo?.update_available ? (
+            <>
+              <Alert
+                type="info"
+                showIcon
+                message="更新内容"
+                description={updateInfo?.release_notes ? <pre style={{ whiteSpace: 'pre-wrap', maxHeight: 180, overflow: 'auto', margin: 0 }}>{updateInfo.release_notes}</pre> : '本次 Release 未填写更新说明。'}
+              />
+              <Progress
+                percent={updateProgress.percent}
+                status={updateProgress.status === 'failed' ? 'exception' : updateProgress.status === 'restarting' ? 'active' : undefined}
+                style={{ marginTop: 16 }}
+              />
+              {updateProgress.message && <Text type={updateProgress.status === 'failed' ? 'danger' : 'secondary'}>{updateProgress.message}</Text>}
+              <p>配置文件、许可证和运行数据会被保留。</p>
+            </>
+          ) : <Alert type="success" showIcon message={`当前已是最新版本 v${updateInfo?.current_version || systemInfo.version}`} />}
         </Modal>
       </Content>
       <footer className="admin-footer">

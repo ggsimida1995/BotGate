@@ -50,6 +50,11 @@ struct AdminNginxToggleInput {
 }
 
 #[derive(Debug, Deserialize)]
+struct AdminNginxDeleteInput {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct AdminBanInput {
     ip: String,
     reason: String,
@@ -900,6 +905,68 @@ pub(crate) async fn admin_nginx_toggle(
         );
     }
     json_response(StatusCode::OK, serde_json::json!({"site":site}))
+}
+
+pub(crate) async fn admin_nginx_delete(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let input: AdminNginxDeleteInput = match admin_input(request).await {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    let gateway = state.gateway.status().await;
+    let (host, ignored_hosts) = {
+        let mut manager = match state.nginx.lock() {
+            Ok(manager) => manager,
+            Err(_) => {
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({"message":"Nginx 扫描状态不可用"}),
+                )
+            }
+        };
+        let host = match manager.remove_site(&input.id, &gateway.http_listen) {
+            Ok(host) => host,
+            Err(error) => {
+                return json_response(
+                    StatusCode::BAD_REQUEST,
+                    serde_json::json!({"message":error.to_string()}),
+                )
+            }
+        };
+        (host, manager.ignored_hosts())
+    };
+    let ignored = match serde_json::to_string(&ignored_hosts) {
+        Ok(value) => value,
+        Err(error) => {
+            error!(error = %error, "failed to encode ignored Nginx sites");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 忽略站点保存失败"}),
+            );
+        }
+    };
+    if let Err(error) = state
+        .storage
+        .set_setting("nginx.ignored_hosts", &ignored)
+        .and_then(|_| state.storage.delete_site(&host))
+        .and_then(|_| refresh_managed_runtime(&state))
+    {
+        error!(error = %error, host = %host, "failed to remove Nginx site");
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":"Nginx 站点移除后运行路由同步失败"}),
+        );
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"deleted":true,"host":host}),
+    )
 }
 
 pub(crate) async fn admin_save_site(
