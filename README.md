@@ -18,6 +18,8 @@ cargo run --release
 
 编译后也可以在 `backend/` 中直接运行 `target/release/bot-gate`；Windows 使用 `target\release\bot-gate.exe`。如果从仓库根目录直接运行二进制，使用 `backend/target/release/bot-gate`，程序会自动找到 `backend/config.toml`。以后修改 React 前端后，重新执行 `cd frontend && npm run build` 即可。
 
+Windows 和 macOS 使用 Tauri 2 桌面客户端。开发时先构建后端和前端，再运行 `cargo tauri dev --manifest-path desktop/Cargo.toml`；客户端会隐藏后端控制台，自动打开管理窗口，并在系统托盘或菜单栏驻留。发布包由 GitHub Actions 准备 `desktop/resources/` 后执行 `cargo tauri build` 生成。
+
 启动后默认尝试监听管理端口 `127.0.0.1:9090`，不会立即占用网关端口 `127.0.0.1:8080`。如果端口被占用，程序会自动选择空闲端口，并在管理台的系统状态中显示实际地址。打开管理台后，点击“启动网关”才会启动反向代理；许可证启用时必须先激活有效许可证。点击“停止网关”会释放网关端口，管理台仍保持可用。
 
 首次创建配置时，在 `backend/` 目录执行 `cp config.example.toml config.toml`；Windows PowerShell 使用 `Copy-Item config.example.toml config.toml`。
@@ -27,6 +29,7 @@ cargo run --release
 ```text
 backend/    Rust gateway, proxy, verification, security and SQLite management
 frontend/   React + Ant Design admin and Challenge pages
+desktop/    Tauri 2 desktop shell for the Windows/macOS management client
 frontend/dist/
             Generated production assets served by the Rust backend (ignored by Git)
 backend/config.toml
@@ -176,4 +179,4 @@ See [docs/SECURITY.md](docs/SECURITY.md) for threat boundaries and [docs/ARCHITE
 
 The current workflow builds directly from this repository and publishes release archives. Source privacy can be addressed later after the project structure is stable. See [docs/RELEASE.md](docs/RELEASE.md) for release steps and the `[update]` configuration. The dashboard checks the latest GitHub Release, downloads the matching platform package, verifies its SHA-256 checksum, then restarts through a small platform updater while preserving configuration and runtime data.
 
-Windows releases are distributed as a single installer that places `bot-gate.exe`, `config.toml`, and the runtime assets together. macOS releases are distributed as a `.dmg` containing a fixed `BotGate.app` bundle; the Finder display name is localized to `网站卫士` on Simplified Chinese systems and `Bot Gate` otherwise. The version remains metadata for online updates and is kept in release filenames, not the installed app name. Windows and macOS open a native `egui` management window and keep a tray/menu-bar entry for focus and exit. Linux keeps the existing loopback Web management dashboard.
+Windows releases are distributed as a single installer that places the Tauri 2 desktop client, Rust backend, configuration, and runtime assets together. macOS releases are distributed as a `.dmg` containing the `网站卫士.app` bundle. The version remains metadata for online updates and is kept in release filenames, not the installed app name. Windows and macOS open the existing React + Ant Design dashboard in a Tauri window and keep a tray/menu-bar entry for focus and exit. Linux keeps the existing loopback Web management dashboard.

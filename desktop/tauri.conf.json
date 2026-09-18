@@ -1,0 +1,27 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "网站卫士",
+  "version": "0.2.19",
+  "identifier": "com.ggsimida.botgate",
+  "build": {
+    "frontendDist": "../frontend/dist"
+  },
+  "app": {
+    "windows": [],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "category": "Utility",
+    "icon": [
+      "../packaging/assets/bot-gate-icon.png",
+      "../packaging/assets/bot-gate-icon.ico",
+      "../packaging/assets/bot-gate-icon.icns"
+    ],
+    "resources": {
+      "resources/": "resources/"
+    }
+  }
+}

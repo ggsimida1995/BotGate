@@ -3,8 +3,8 @@
 Bot Gate 的发布包由 GitHub Actions 在推送 `v*` 标签时自动生成，包含：
 
 - Linux 包包含 `bot-gate`、`frontend/dist` 和可复制修改的 `config.toml`，管理台通过本机 Web 页面访问；
-- macOS `.dmg` 包含完整 `.app`，内含后端、egui 桌面管理界面和默认配置；
-- Windows 安装程序包含后端、egui 桌面管理界面和默认配置；
+- macOS `.dmg` 包含完整 Tauri 2 `.app`，内含 React 管理界面、Rust 后端和默认配置；
+- Windows 安装程序包含 Tauri 2 桌面客户端、Rust 后端和默认配置；
 - `LICENSE` 与 `README.md`。
 
 ## 发布
@@ -17,15 +17,17 @@ git push origin v0.1.0
 工作流会生成 Linux x64 压缩包、macOS arm64 安装磁盘映像（`.dmg`）和 Windows x64 安装程序（`.exe`），并附加到 GitHub Release。
 版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.8` 时使用 `v0.2.8`。
 
-macOS 安装包内含完整的 `.app`，其中包含 Rust 后端、egui 桌面管理界面和默认 `config.toml`。将应用拖到“应用程序”后即可启动。首次启动会把配置复制到 `~/Library/Application Support/BotGate/`，数据库和签名密钥也会写入该用户目录，不需要修改应用包权限。
+Windows/macOS 桌面端的开发启动方式：先在仓库根目录构建 `frontend` 和 `backend`，然后执行 `cargo tauri dev --manifest-path desktop/Cargo.toml`。正式构建前，将后端可执行文件、`config.toml` 和 `frontend/dist` 放入 `desktop/resources/`，再执行 `cargo tauri build`。
 
-Windows 安装程序会把后端、egui 桌面客户端、默认配置和应用图标安装到当前用户的 Bot Gate 目录，并创建开始菜单快捷方式；安装完成后会直接打开桌面管理窗口，同时保留系统托盘菜单。macOS 版打开原生 egui 管理窗口并保留菜单栏图标，可用于聚焦窗口或退出 Bot Gate。
+macOS 安装包内含完整的 Tauri 2 `.app`，其中包含 React 管理界面、Rust 后端和默认 `config.toml`。将应用拖到“应用程序”后即可启动。首次启动会把配置复制到应用数据目录，数据库和签名密钥也会写入该用户目录，不需要修改应用包权限。
+
+Windows 安装程序会把 Tauri 2 桌面客户端、后端、默认配置和应用图标安装到当前用户的 Bot Gate 目录，并创建开始菜单快捷方式；安装完成后会直接打开桌面管理窗口，同时保留系统托盘菜单。macOS 版打开 Tauri 管理窗口并保留菜单栏图标，可用于聚焦窗口或退出 Bot Gate。
 
 应用图标源文件位于 `packaging/assets/`：SVG 源稿、压缩 PNG、Windows `.ico` 和 macOS `.icns`。发布包不包含带水印的原始设计图。
 
 ## Windows 启动
 
-直接运行安装程序即可。安装器会把后端、配置、桌面客户端和 `bot-gate.ico` 放入同一安装目录，并创建带图标的快捷方式。Windows 版本不会弹出控制台窗口，而是打开原生 egui 管理窗口并在系统托盘驻留；右键托盘图标可聚焦窗口或退出程序。配置错误等启动失败会弹出错误对话框。
+直接运行安装程序即可。Tauri 安装器会把桌面客户端、后端、配置和前端资源放入应用目录，并创建带图标的快捷方式。Windows 版本不会弹出控制台窗口，启动后显示 React 管理窗口并在系统托盘驻留；右键托盘图标可聚焦窗口或退出程序。
 
 首次运行会在包目录附近创建 `data/secret.key` 和 SQLite 数据库。升级时保留 `config.toml` 与 `data/`，只替换可执行文件和 `frontend/` 目录。
 

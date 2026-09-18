@@ -66,26 +66,25 @@ jobs:
       - name: Build backend
         working-directory: backend
         run: cargo build --release --locked
+      - name: Install Tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
       - name: Package
         run: |
           version="${GITHUB_REF_NAME#v}"
-          app="BotGate.app"
-          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/frontend"
-          cp backend/target/release/bot-gate "$app/Contents/MacOS/bot-gate"
-          chmod +x "$app/Contents/MacOS/bot-gate"
-          cp backend/config.example.toml "$app/Contents/Resources/config.toml"
-          cp -R frontend/dist "$app/Contents/Resources/frontend/"
-          cp LICENSE README.md "$app/Contents/Resources/"
-          cp packaging/assets/bot-gate-icon.icns "$app/Contents/Resources/"
-          mkdir -p "$app/Contents/Resources/zh-Hans.lproj"
-          cp packaging/macos/zh-Hans.lproj/InfoPlist.strings "$app/Contents/Resources/zh-Hans.lproj/"
-          sed "s/@VERSION@/$version/g" packaging/macos/Info.plist > "$app/Contents/Info.plist"
-          test -f "$app/Contents/Resources/config.toml"
-          test -f "$app/Contents/Resources/frontend/dist/admin.html"
-          test -f "$app/Contents/Resources/frontend/dist/challenge.html"
-          test -f "$app/Contents/Resources/bot-gate-icon.icns"
-          test -f "$app/Contents/Resources/zh-Hans.lproj/InfoPlist.strings"
-          hdiutil create -volname "Bot Gate" -srcfolder "$app" -ov -format UDZO "BotGate-${version}-macos-arm64.dmg"
+          rm -rf desktop/resources
+          mkdir -p desktop/resources/frontend
+          cp backend/target/release/bot-gate desktop/resources/bot-gate-backend
+          cp backend/config.example.toml desktop/resources/config.toml
+          cp -R frontend/dist desktop/resources/frontend/
+          test -f desktop/resources/config.toml
+          test -f desktop/resources/frontend/dist/admin.html
+          test -f desktop/resources/frontend/dist/challenge.html
+          sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$version\"/" desktop/tauri.conf.json
+          sed -i '' "s/^version = \"[^\"]*\"/version = \"$version\"/" desktop/Cargo.toml
+          (cd desktop && cargo tauri build --ci --bundles dmg)
+          dmg=$(find desktop/target/release/bundle/dmg -name '*.dmg' -print -quit)
+          test -n "$dmg"
+          cp "$dmg" "BotGate-${version}-macos-arm64.dmg"
           shasum -a 256 "BotGate-${version}-macos-arm64.dmg" > "BotGate-${version}-macos-arm64.dmg.sha256"
       - uses: softprops/action-gh-release@v2
         with:
@@ -112,28 +111,33 @@ jobs:
         working-directory: backend
         shell: pwsh
         run: cargo build --release --locked
-      - name: Install Inno Setup
+      - name: Install Tauri CLI
         shell: pwsh
-        run: choco install innosetup --no-progress -y
+        run: cargo install tauri-cli --version "^2" --locked
       - name: Package
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.Substring(1)
-          $staging = "packaging/windows/staging"
-          New-Item -ItemType Directory -Force "$staging/frontend/dist" | Out-Null
-          Copy-Item backend/target/release/bot-gate.exe "$staging/"
-          Copy-Item backend/config.example.toml "$staging/config.toml"
-          Copy-Item packaging/assets/bot-gate-icon.ico "$staging/bot-gate.ico"
-          Copy-Item frontend/dist/* "$staging/frontend/dist/" -Recurse
-          Copy-Item LICENSE, README.md "$staging/"
-          if (-not (Test-Path "$staging/config.toml")) { throw "config.toml missing from installer" }
-          if (-not (Test-Path "$staging/frontend/dist/admin.html")) { throw "admin.html missing from installer" }
-          if (-not (Test-Path "$staging/frontend/dist/challenge.html")) { throw "challenge.html missing from installer" }
-          $compiler = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $compiler)) { throw "Inno Setup compiler not found" }
-          & $compiler "/DAppVersion=$version" "packaging/windows/BotGate.iss"
-          $installer = "packaging/windows/output/BotGate-$version-windows-x64-setup.exe"
-          Copy-Item $installer "."
+          if (Test-Path desktop/resources) { Remove-Item desktop/resources -Recurse -Force }
+          New-Item -ItemType Directory -Force desktop/resources/frontend | Out-Null
+          Copy-Item backend/target/release/bot-gate.exe desktop/resources/bot-gate-backend.exe
+          Copy-Item backend/config.example.toml desktop/resources/config.toml
+          Copy-Item frontend/dist desktop/resources/frontend/ -Recurse
+          if (-not (Test-Path desktop/resources/config.toml)) { throw "config.toml missing from bundle" }
+          if (-not (Test-Path desktop/resources/frontend/dist/admin.html)) { throw "admin.html missing from bundle" }
+          if (-not (Test-Path desktop/resources/frontend/dist/challenge.html)) { throw "challenge.html missing from bundle" }
+          $config = Get-Content desktop/tauri.conf.json -Raw
+          $config = [regex]::Replace($config, '"version": "[^"]*"', ('"version": "' + $version + '"'), 1)
+          Set-Content desktop/tauri.conf.json $config -NoNewline
+          $desktopCargo = Get-Content desktop/Cargo.toml -Raw
+          $desktopCargo = [regex]::Replace($desktopCargo, '(?m)^version = "[^"]*"', ('version = "' + $version + '"'), 1)
+          Set-Content desktop/Cargo.toml $desktopCargo -NoNewline
+          Push-Location desktop
+          cargo tauri build --ci --bundles nsis
+          Pop-Location
+          $installer = Get-ChildItem desktop/target/release/bundle/nsis/*setup.exe | Select-Object -First 1
+          if (-not $installer) { throw "Tauri installer was not created" }
+          Copy-Item $installer.FullName "BotGate-$version-windows-x64-setup.exe"
           $hash = (Get-FileHash "BotGate-$version-windows-x64-setup.exe" -Algorithm SHA256).Hash.ToLower()
           "$hash  BotGate-$version-windows-x64-setup.exe" | Set-Content "BotGate-$version-windows-x64-setup.exe.sha256"
       - uses: softprops/action-gh-release@v2

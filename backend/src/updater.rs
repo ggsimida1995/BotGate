@@ -439,12 +439,13 @@ async fn schedule_platform_update(temp_dir: &Path, package_name: &str) -> Result
 async fn schedule_windows_update(temp_dir: &Path, package_name: &str) -> Result<()> {
     use std::os::windows::process::CommandExt;
 
-    let executable = env::current_exe().context("无法定位当前程序")?;
+    let executable = desktop_executable()?;
+    let parent_pid = desktop_pid();
     let installer = temp_dir.join(package_name);
     let script = temp_dir.join("update.ps1");
     let script_body = format!(
         "$ErrorActionPreference = 'Stop'\n$parentPid = {pid}\n$log = Join-Path $env:TEMP 'bot-gate-update.log'\n\"Bot Gate update started $(Get-Date -Format o)\" | Set-Content -LiteralPath $log\ntry {{\n  $deadline = (Get-Date).AddMinutes(5)\n  while ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 500 }}\n  if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{ throw '旧进程在 5 分钟内没有退出' }}\n  $installerProcess = Start-Process -FilePath {installer} -ArgumentList @('/VERYSILENT','/SUPPRESSMSGBOXES','/CLOSEAPPLICATIONS','/RESTARTAPPLICATIONS') -WorkingDirectory {working_directory} -PassThru -Wait\n  if ($installerProcess.ExitCode -ne 0) {{ throw \"安装器退出码: $($installerProcess.ExitCode)\" }}\n  if (Test-Path -LiteralPath {executable}) {{ Start-Process -FilePath {executable} -WorkingDirectory {working_directory} }}\n  \"Bot Gate update completed $(Get-Date -Format o)\" | Add-Content -LiteralPath $log\n}} catch {{\n  \"Bot Gate update failed: $($_.Exception.Message)\" | Add-Content -LiteralPath $log\n  exit 1\n}} finally {{\n  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\n}}\n",
-        pid = std::process::id(),
+        pid = parent_pid,
         installer = powershell_quote(&installer),
         executable = powershell_quote(&executable),
         working_directory = powershell_quote(executable.parent().unwrap_or_else(|| Path::new("."))),
@@ -478,7 +479,8 @@ fn powershell_quote(path: &Path) -> String {
 async fn schedule_macos_update(temp_dir: &Path, package_name: &str) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
-    let executable = env::current_exe().context("无法定位当前程序")?;
+    let executable = desktop_executable()?;
+    let parent_pid = desktop_pid();
     let app = executable
         .parent()
         .and_then(Path::parent)
@@ -489,7 +491,7 @@ async fn schedule_macos_update(temp_dir: &Path, package_name: &str) -> Result<()
     let script = temp_dir.join("update.sh");
     let script_body = format!(
         "#!/bin/sh\nset -eu\nparent_pid={pid}\nwhile kill -0 \"$parent_pid\" 2>/dev/null; do sleep 1; done\nmount_dir=$(mktemp -d)\ncleanup() {{ hdiutil detach \"$mount_dir\" >/dev/null 2>&1 || true; rm -rf \"$mount_dir\"; }}\ntrap cleanup EXIT\nhdiutil attach {dmg} -nobrowse -readonly -mountpoint \"$mount_dir\" >/dev/null\nnew_app=$(find \"$mount_dir\" -maxdepth 1 -type d -name '*.app' -print -quit)\napp_path={app}\ntmp_app=\"${{app_path}}.update\"\nbackup_app=\"${{app_path}}.backup\"\nrm -rf \"$tmp_app\" \"$backup_app\"\nditto \"$new_app\" \"$tmp_app\"\nmv \"$app_path\" \"$backup_app\"\nif mv \"$tmp_app\" \"$app_path\"; then\n  open \"$app_path\"\n  rm -rf \"$backup_app\"\nelse\n  mv \"$backup_app\" \"$app_path\"\n  exit 1\nfi\nrm -f \"$0\"\n",
-        pid = std::process::id(),
+        pid = parent_pid,
         dmg = shell_quote(&dmg),
         app = shell_quote(&app),
     );
@@ -544,6 +546,20 @@ fn schedule_process_exit() {
         tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
         std::process::exit(0);
     });
+}
+
+fn desktop_executable() -> Result<PathBuf> {
+    env::var_os("BOT_GATE_DESKTOP_EXECUTABLE")
+        .map(PathBuf::from)
+        .or_else(|| env::current_exe().ok())
+        .context("无法定位当前程序")
+}
+
+fn desktop_pid() -> u32 {
+    env::var("BOT_GATE_DESKTOP_PID")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or_else(std::process::id)
 }
 
 #[cfg(test)]

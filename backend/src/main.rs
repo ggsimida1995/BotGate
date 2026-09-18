@@ -13,8 +13,6 @@ use std::{
 mod admin;
 mod caddy;
 mod config;
-#[cfg(any(target_os = "windows", target_os = "macos"))]
-mod desktop;
 mod gateway;
 mod http;
 mod license;
@@ -763,6 +761,11 @@ fn whitelist_rule_from_record(entry: &ManagedWhitelist) -> Result<WhitelistRule>
 }
 
 fn frontend_dist_path(config_path: &Path) -> PathBuf {
+    if let Some(path) = env::var_os("BOT_GATE_FRONTEND_DIST").map(PathBuf::from) {
+        if path.join("admin.html").exists() && path.join("challenge.html").exists() {
+            return path;
+        }
+    }
     let config_dir = config_path.parent().unwrap_or_else(|| Path::new("."));
     let mut candidates = vec![
         config_dir.join("frontend/dist"),
@@ -788,12 +791,12 @@ async fn main() {
 
 async fn run() -> Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
-    let config_path = env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .unwrap_or_else(default_config_path);
+    let (config_path, headless) = startup_options();
     let config_path = prepare_config_path(config_path)?;
-    let config = load_config(&config_path)?;
+    let mut config = load_config(&config_path)?;
+    if let Ok(listen) = env::var("BOT_GATE_ADMIN_LISTEN") {
+        config.admin.listen = listen;
+    }
     let state = build_state(&config, frontend_dist_path(&config_path))?;
     let tls_config = if config.tls.enabled {
         Some(
@@ -849,12 +852,17 @@ async fn run() -> Result<()> {
     if let Some(admin_state) = admin_state {
         let (admin_listener, admin_address) = bind_listener(&config.admin.listen, "admin").await?;
         let admin_url = format!("http://{admin_address}");
-        let (tray_handle, tray_events, tray_enabled) = match tray::start(admin_url.clone()) {
-            Ok((handle, events)) => (Some(handle), events, true),
-            Err(error) => {
-                warn!(error = %error, "system tray unavailable; management API remains available");
-                let (_, events) = mpsc::unbounded_channel();
-                (None, events, false)
+        let (tray_handle, tray_events, tray_enabled) = if headless {
+            let (_, events) = mpsc::unbounded_channel();
+            (None, events, false)
+        } else {
+            match tray::start(admin_url.clone()) {
+                Ok((handle, events)) => (Some(handle), events, true),
+                Err(error) => {
+                    warn!(error = %error, "system tray unavailable; management API remains available");
+                    let (_, events) = mpsc::unbounded_channel();
+                    (None, events, false)
+                }
             }
         };
         let admin_app = Router::new()
@@ -910,10 +918,18 @@ async fn run() -> Result<()> {
         });
         #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
-            let desktop_result = desktop::run(admin_url, tray_handle, tray_events, tray_enabled);
+            if !headless {
+                bail!(
+                    "Windows 和 macOS 请从网站卫士桌面客户端启动；后端子进程需要 --headless 参数"
+                );
+            }
+            let _tray_handle = tray_handle;
+            let _tray_events = tray_events;
+            let _tray_enabled = tray_enabled;
+            shutdown_signal().await;
             admin_task.abort();
             gateway.stop().await;
-            return desktop_result;
+            return Ok(());
         }
 
         #[cfg(not(any(target_os = "windows", target_os = "macos")))]
@@ -964,6 +980,19 @@ async fn run() -> Result<()> {
         shutdown_signal().await;
     }
     Ok(())
+}
+
+fn startup_options() -> (PathBuf, bool) {
+    let mut config_path = None;
+    let mut headless = false;
+    for argument in env::args_os().skip(1) {
+        if argument == "--headless" {
+            headless = true;
+        } else if config_path.is_none() {
+            config_path = Some(PathBuf::from(argument));
+        }
+    }
+    (config_path.unwrap_or_else(default_config_path), headless)
 }
 
 fn report_startup_error(error: &anyhow::Error) {

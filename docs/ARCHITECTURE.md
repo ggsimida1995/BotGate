@@ -43,7 +43,7 @@ The admin listener is separate and defaults to `127.0.0.1:9090`. Process startup
 | `storage` | SQLite schema and batched writes |
 | `admin` | Loopback-only dashboard and management API |
 
-The source layout mirrors these boundaries: `backend/src/config.rs`, `backend/src/security.rs`, `backend/src/http.rs`, `backend/src/proxy.rs`, `backend/src/verification.rs`, `backend/src/storage.rs`, and `backend/src/admin.rs` keep configuration, enforcement, HTTP helpers, transport, challenge, persistence, and management code out of the request entry point. `backend/src/main.rs` focuses on wiring, request orchestration and lifecycle. The React + Ant Design management and challenge pages live under `frontend/src/` and build into `frontend/dist/`.
+The source layout mirrors these boundaries: `backend/src/config.rs`, `backend/src/security.rs`, `backend/src/http.rs`, `backend/src/proxy.rs`, `backend/src/verification.rs`, `backend/src/storage.rs`, and `backend/src/admin.rs` keep configuration, enforcement, HTTP helpers, transport, challenge, persistence, and management code out of the request entry point. `backend/src/main.rs` focuses on wiring, request orchestration and lifecycle. The React + Ant Design management and challenge pages live under `frontend/src/` and build into `frontend/dist/`; Windows and macOS wrap that dashboard in the Tauri 2 client under `desktop/`.
 
 ## Global verification
 

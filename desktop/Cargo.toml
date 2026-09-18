@@ -1,0 +1,14 @@
+[package]
+name = "bot-gate-desktop"
+version = "0.2.19"
+edition = "2021"
+description = "Bot Gate desktop management client"
+license = "MIT"
+publish = false
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+url = "2"
