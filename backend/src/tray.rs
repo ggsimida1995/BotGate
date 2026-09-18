@@ -1,4 +1,4 @@
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "macos")))]
 use std::process::Command;
 
 use anyhow::{Context, Result};
@@ -94,9 +94,9 @@ pub(crate) fn start(admin_url: String) -> Result<(TrayHandle, UnboundedReceiver<
             },
         )
         .context("failed to create macOS menu bar icon")?;
-        let open_url = admin_url.clone();
+        let open_sender = sender.clone();
         tray.add_menu_item("打开管理后台", move || {
-            let _ = open_admin(&open_url);
+            let _ = open_sender.send(TrayCommand::OpenAdmin);
         })
         .context("failed to create macOS management menu")?;
         tray.inner_mut().add_quit_item("退出网站卫士");
@@ -123,6 +123,7 @@ impl TrayHandle {
     }
 }
 
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub(crate) fn open_admin(url: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {

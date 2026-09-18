@@ -13,6 +13,8 @@ use std::{
 mod admin;
 mod caddy;
 mod config;
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod desktop;
 mod gateway;
 mod http;
 mod license;
@@ -847,8 +849,7 @@ async fn run() -> Result<()> {
     if let Some(admin_state) = admin_state {
         let (admin_listener, admin_address) = bind_listener(&config.admin.listen, "admin").await?;
         let admin_url = format!("http://{admin_address}");
-        let (mut tray_handle, mut tray_events, tray_enabled) = match tray::start(admin_url.clone())
-        {
+        let (tray_handle, tray_events, tray_enabled) = match tray::start(admin_url.clone()) {
             Ok((handle, events)) => (Some(handle), events, true),
             Err(error) => {
                 warn!(error = %error, "system tray unavailable; management API remains available");
@@ -895,6 +896,7 @@ async fn run() -> Result<()> {
             .route("/api/reload", post(admin_reload_config))
             .with_state(admin_state);
         info!(address = %admin_listener.local_addr()?, "bot-gate admin listening");
+        #[allow(unused_mut, unused_variables)]
         let mut admin_task = tokio::spawn(async move {
             if let Err(error) = axum::serve(
                 admin_listener,
@@ -906,19 +908,28 @@ async fn run() -> Result<()> {
                 error!(error = %error, "admin server failed");
             }
         });
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        {
+            let desktop_result = desktop::run(admin_url, tray_handle, tray_events, tray_enabled);
+            admin_task.abort();
+            gateway.stop().await;
+            return desktop_result;
+        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         if let Err(error) = tray::open_admin(&admin_url) {
             warn!(error = %error, "failed to open management dashboard automatically");
         }
-        #[cfg(target_os = "macos")]
-        if let Some(handle) = tray_handle.as_mut() {
-            handle.display();
-            admin_task.abort();
-            gateway.stop().await;
-            return Ok(());
-        }
+
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let _tray_handle = tray_handle;
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let mut tray_events = tray_events;
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         let shutdown = shutdown_signal();
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         tokio::pin!(shutdown);
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         loop {
             tokio::select! {
                 result = &mut admin_task => {
@@ -946,6 +957,7 @@ async fn run() -> Result<()> {
                 }
             }
         }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
         gateway.stop().await;
     } else {
         warn!("admin listener is disabled; gateway must be started from the admin listener");
