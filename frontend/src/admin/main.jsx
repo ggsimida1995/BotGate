@@ -422,7 +422,7 @@ function AdminConsole() {
             {gatewayStatus.running ? '停止网关' : '启动网关'}
           </Button>
           <Tooltip title="激活许可证"><Button aria-label="激活许可证" icon={<KeyOutlined />} onClick={() => setLicenseModal(true)} /></Tooltip>
-          <Tooltip title="检查更新"><Button aria-label="检查更新" loading={updateLoading} icon={<CloudDownloadOutlined />} onClick={checkForUpdates} /></Tooltip>
+          <Tooltip title="检查更新"><Button aria-label="检查更新" loading={updateLoading} icon={<CloudDownloadOutlined />} onClick={() => checkForUpdates(false)} /></Tooltip>
           <Tooltip title="重新加载配置"><Button aria-label="重新加载配置" icon={<ReloadOutlined />} onClick={reloadConfig} /></Tooltip>
           <Tooltip title="刷新数据"><Button type="primary" aria-label="刷新数据" icon={<SyncOutlined spin={loading} />} onClick={refresh} /></Tooltip>
         </div>

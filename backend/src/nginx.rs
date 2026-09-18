@@ -327,37 +327,7 @@ impl NginxManager {
 pub(crate) fn pick_directory() -> Result<Option<String>> {
     #[cfg(target_os = "windows")]
     {
-        let script = r#"
-Add-Type -AssemblyName System.Windows.Forms
-[System.Windows.Forms.Application]::EnableVisualStyles()
-$dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-$dialog.Description = '选择 Nginx 配置目录'
-$dialog.RootFolder = [System.Environment+SpecialFolder]::MyComputer
-$dialog.ShowNewFolderButton = $false
-if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-  [Console]::Out.WriteLine($dialog.SelectedPath)
-}
-"#;
-        let output = Command::new("powershell.exe")
-            .args([
-                "-NoLogo",
-                "-NoProfile",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-STA",
-                "-WindowStyle",
-                "Normal",
-                "-Command",
-                script,
-            ])
-            .output()
-            .context("无法打开 Windows 文件夹选择器")?;
-        if !output.status.success() {
-            let detail = command_output(&output.stdout, &output.stderr);
-            bail!("Windows 文件夹选择器执行失败: {detail}");
-        }
-        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        return Ok((!path.is_empty()).then_some(path));
+        return windows_pick_directory();
     }
     #[cfg(target_os = "macos")]
     {
@@ -395,6 +365,75 @@ if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     Ok(None)
+}
+
+#[cfg(target_os = "windows")]
+fn windows_pick_directory() -> Result<Option<String>> {
+    use std::{ffi::c_void, ptr};
+
+    #[repr(C)]
+    struct ItemIdList {
+        _private: [u8; 0],
+    }
+
+    type BrowseCallback = Option<unsafe extern "system" fn(isize, u32, isize, isize) -> i32>;
+
+    #[repr(C)]
+    struct BrowseInfoW {
+        hwnd_owner: isize,
+        pidl_root: *mut ItemIdList,
+        display_name: *mut u16,
+        title: *const u16,
+        flags: u32,
+        callback: BrowseCallback,
+        callback_data: isize,
+        image: i32,
+    }
+
+    #[link(name = "shell32")]
+    extern "system" {
+        fn SHBrowseForFolderW(info: *const BrowseInfoW) -> *mut ItemIdList;
+        fn SHGetPathFromIDListW(item: *const ItemIdList, path: *mut u16) -> i32;
+    }
+
+    #[link(name = "ole32")]
+    extern "system" {
+        fn CoTaskMemFree(value: *const c_void);
+    }
+
+    const BIF_RETURNONLYFSDIRS: u32 = 0x0001;
+    const BIF_NEWDIALOGSTYLE: u32 = 0x0040;
+    let title: Vec<u16> = "选择 Nginx 配置目录"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut display_name = vec![0u16; 260];
+    let info = BrowseInfoW {
+        hwnd_owner: 0,
+        pidl_root: ptr::null_mut(),
+        display_name: display_name.as_mut_ptr(),
+        title: title.as_ptr(),
+        flags: BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE,
+        callback: None,
+        callback_data: 0,
+        image: 0,
+    };
+    let item = unsafe { SHBrowseForFolderW(&info) };
+    if item.is_null() {
+        return Ok(None);
+    }
+    let mut path = vec![0u16; 32_768];
+    let selected = unsafe { SHGetPathFromIDListW(item, path.as_mut_ptr()) != 0 };
+    unsafe { CoTaskMemFree(item.cast()) };
+    if !selected {
+        return Ok(None);
+    }
+    let length = path
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(path.len());
+    let path = String::from_utf16(&path[..length]).context("Windows 路径编码无效")?;
+    Ok((!path.is_empty()).then_some(path))
 }
 
 impl SiteRef {
@@ -455,16 +494,26 @@ fn collect_included_files(prefix: &Path, files: &mut Vec<PathBuf>) -> Result<()>
         };
         for pattern in include_patterns(&source) {
             let path = Path::new(&pattern);
-            let candidate = if path.is_absolute() {
-                path.to_path_buf()
+            let bases = if path.is_absolute() {
+                vec![PathBuf::new()]
             } else {
-                prefix.join(path)
+                vec![
+                    prefix.to_path_buf(),
+                    file.parent().unwrap_or(prefix).to_path_buf(),
+                ]
             };
-            for included in expand_path_pattern(&candidate) {
-                if included.is_file() && !files.contains(&included) {
-                    files.push(included);
-                    if files.len() >= MAX_CONFIG_FILES {
-                        break;
+            for base in bases {
+                let candidate = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    base.join(path)
+                };
+                for included in expand_path_pattern(&candidate) {
+                    if included.is_file() && !files.contains(&included) {
+                        files.push(included);
+                        if files.len() >= MAX_CONFIG_FILES {
+                            break;
+                        }
                     }
                 }
             }
@@ -474,15 +523,25 @@ fn collect_included_files(prefix: &Path, files: &mut Vec<PathBuf>) -> Result<()>
 }
 
 fn include_patterns(source: &str) -> Vec<String> {
-    source
+    let source = source
         .lines()
+        .map(without_comment)
+        .collect::<Vec<_>>()
+        .join("\n");
+    source
+        .split(';')
         .filter_map(|line| {
             let line = without_comment(line).trim();
-            let rest = line.strip_prefix("include")?;
-            if !rest.chars().next().is_some_and(char::is_whitespace) {
+            let marker = line.find("include")?;
+            if marker > 0
+                && !line[..marker]
+                    .chars()
+                    .last()
+                    .is_some_and(|ch| ch.is_whitespace() || matches!(ch, '{' | '}'))
+            {
                 return None;
             }
-            let value = rest.trim().trim_end_matches(';');
+            let value = line[marker + "include".len()..].trim();
             (!value.is_empty()).then(|| value.trim_matches('"').trim_matches('\'').to_string())
         })
         .collect()
@@ -769,5 +828,89 @@ mod tests {
         assert!(wildcard_match("*.conf", "site.conf"));
         assert!(wildcard_match("conf?.d", "conf1.d"));
         assert!(!wildcard_match("*.conf", "site.conf.bak"));
+    }
+
+    #[test]
+    fn removing_one_nginx_site_does_not_remove_other_sites() {
+        let mut manager = NginxManager::default();
+        manager.sites.insert(
+            "one".to_string(),
+            SiteRef {
+                id: "one".to_string(),
+                host: "one.test".to_string(),
+                target: "http://127.0.0.1:3001".to_string(),
+                original_target: "http://127.0.0.1:3001".to_string(),
+                config_file: PathBuf::from("nginx.conf"),
+                block_start: 0,
+                block_end: 1,
+                proxy_line: 0,
+                protected: false,
+                supported: true,
+            },
+        );
+        manager.sites.insert(
+            "two".to_string(),
+            SiteRef {
+                id: "two".to_string(),
+                host: "two.test".to_string(),
+                target: "http://127.0.0.1:3002".to_string(),
+                original_target: "http://127.0.0.1:3002".to_string(),
+                config_file: PathBuf::from("nginx.conf"),
+                block_start: 2,
+                block_end: 3,
+                proxy_line: 2,
+                protected: false,
+                supported: true,
+            },
+        );
+
+        assert_eq!(
+            manager.remove_site("one", "127.0.0.1:9090").unwrap(),
+            "one.test"
+        );
+        assert!(!manager.sites.contains_key("one"));
+        assert!(manager.sites.contains_key("two"));
+    }
+
+    #[test]
+    fn scans_servers_from_included_files_outside_selected_conf_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "bot-gate-nginx-test-{}-{}",
+            std::process::id(),
+            unix_test_suffix()
+        ));
+        let conf = root.join("conf");
+        let sites = root.join("sites-enabled");
+        fs::create_dir_all(&sites).unwrap();
+        fs::create_dir_all(&conf).unwrap();
+        fs::write(
+            conf.join("nginx.conf"),
+            "http { include sites-enabled/*.conf; }\n",
+        )
+        .unwrap();
+        fs::write(
+            sites.join("cool.conf"),
+            "server {\n server_name cool.test;\n location / {\n  proxy_pass http://127.0.0.1:3000;\n }\n}\n",
+        )
+        .unwrap();
+
+        let mut manager = NginxManager::default();
+        manager.configure(conf.display().to_string(), None).unwrap();
+        let discovered = manager.scan().unwrap();
+        assert_eq!(
+            discovered
+                .iter()
+                .map(|site| site.host.as_str())
+                .collect::<Vec<_>>(),
+            ["cool.test"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unix_test_suffix() -> u128 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
     }
 }
