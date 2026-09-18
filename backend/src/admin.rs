@@ -254,7 +254,13 @@ pub(crate) async fn admin_update_apply(
         );
     }
     if let Ok(mut progress) = update_progress.lock() {
-        *progress = crate::updater::UpdateProgress::default();
+        *progress = crate::updater::UpdateProgress {
+            status: "checking".to_string(),
+            percent: 0,
+            message: "正在检查最新版本".to_string(),
+            latest_version: None,
+            release_notes: None,
+        };
     }
     let update_config = state.public_state.update.clone();
     tokio::spawn(async move {
