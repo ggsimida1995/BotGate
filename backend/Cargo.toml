@@ -1,6 +1,6 @@
 [package]
 name = "bot-gate"
-version = "0.2.21"
+version = "0.2.22"
 edition = "2021"
 description = "Cross-platform local web bot gate and reverse proxy"
 license = "MIT"
