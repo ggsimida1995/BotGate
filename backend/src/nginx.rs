@@ -83,7 +83,12 @@ impl NginxManager {
     pub(crate) fn configure(&mut self, config_dir: String, binary: Option<String>) -> Result<()> {
         let config_dir = PathBuf::from(config_dir.trim());
         if !config_dir.is_dir() {
-            bail!("Nginx 配置目录不存在: {}", config_dir.display());
+            bail!("Nginx 运行目录不存在: {}", config_dir.display());
+        }
+        if nginx_config_context(&config_dir).is_none() {
+            bail!(
+                "未找到 nginx.conf，请选择 Nginx 运行目录（例如 nginx、/etc/nginx 或包含 conf/nginx.conf 的目录）"
+            );
         }
         if self.config_dir.as_ref() != Some(&config_dir) {
             self.ignored_hosts.clear();
@@ -99,21 +104,22 @@ impl NginxManager {
         let config_dir = self
             .config_dir
             .as_deref()
-            .context("请先选择 Nginx 配置目录")?;
+            .context("请先选择 Nginx 运行目录")?;
         if !config_dir.is_dir() {
-            bail!("Nginx 配置目录不存在: {}", config_dir.display());
+            bail!("Nginx 运行目录不存在: {}", config_dir.display());
         }
+        let (prefix_dir, main_config) = nginx_config_context(config_dir).context(
+            "未找到 nginx.conf，请选择 Nginx 运行目录（例如 nginx、/etc/nginx 或包含 conf/nginx.conf 的目录）",
+        )?;
         let mut files = Vec::new();
         collect_config_files(config_dir, &mut files)?;
-        if let Some((prefix_dir, main_config)) = nginx_config_context(config_dir) {
-            if !files.contains(&main_config) {
-                files.push(main_config.clone());
-            }
-            collect_included_files(&prefix_dir, &mut files)?;
-            for file in self.effective_config_files(&prefix_dir, &main_config) {
-                if file.is_file() && !files.contains(&file) {
-                    files.push(file);
-                }
+        if !files.contains(&main_config) {
+            files.push(main_config.clone());
+        }
+        collect_included_files(&prefix_dir, &mut files)?;
+        for file in self.effective_config_files(&prefix_dir, &main_config) {
+            if file.is_file() && !files.contains(&file) {
+                files.push(file);
             }
         }
         files.sort();
@@ -281,13 +287,13 @@ impl NginxManager {
         let config_dir = self
             .config_dir
             .as_deref()
-            .context("请先选择 Nginx 配置目录")?;
+            .context("请先选择 Nginx 运行目录")?;
         let (prefix_dir, config) =
-            nginx_config_context(config_dir).context("Nginx 配置目录中缺少 nginx.conf")?;
+            nginx_config_context(config_dir).context("Nginx 运行目录中缺少 nginx.conf")?;
         let relative_config = config.strip_prefix(&prefix_dir).unwrap_or(&config);
         let binary = self.binary_path();
         if !config.is_file() {
-            bail!("Nginx 配置目录中缺少 nginx.conf: {}", config.display());
+            bail!("Nginx 运行目录中缺少 nginx.conf: {}", config.display());
         }
         let test = Command::new(&binary)
             .args(["-p"])
@@ -320,21 +326,40 @@ impl NginxManager {
 
     fn binary_path(&self) -> PathBuf {
         if let Some(binary) = &self.binary {
-            return binary.clone();
+            if binary.is_file() {
+                return binary.clone();
+            }
+            if binary.is_dir() {
+                if let Some(path) = nginx_binary_candidates(binary)
+                    .into_iter()
+                    .find(|path| path.is_file())
+                {
+                    return path;
+                }
+            }
         }
         if let Some(config_dir) = self.config_dir.as_deref() {
-            let candidates = [config_dir.join("nginx.exe"), config_dir.join("nginx")];
-            if let Some(binary) = candidates.into_iter().find(|path| path.is_file()) {
-                return binary;
-            }
+            let mut roots = vec![config_dir.to_path_buf()];
             if let Some(parent) = config_dir.parent() {
-                let candidates = [parent.join("nginx.exe"), parent.join("nginx")];
-                if let Some(binary) = candidates.into_iter().find(|path| path.is_file()) {
+                roots.push(parent.to_path_buf());
+            }
+            if let Some((prefix, _)) = nginx_config_context(config_dir) {
+                roots.push(prefix);
+            }
+            for root in roots {
+                if let Some(binary) = nginx_binary_candidates(&root)
+                    .into_iter()
+                    .find(|path| path.is_file())
+                {
                     return binary;
                 }
             }
         }
-        PathBuf::from("nginx")
+        PathBuf::from(if cfg!(target_os = "windows") {
+            "nginx.exe"
+        } else {
+            "nginx"
+        })
     }
 
     fn effective_config_files(&self, prefix_dir: &Path, config: &Path) -> Vec<PathBuf> {
@@ -371,7 +396,7 @@ pub(crate) fn pick_directory() -> Result<Option<String>> {
         let output = Command::new("osascript")
             .args([
                 "-e",
-                "POSIX path of (choose folder with prompt \"选择 Nginx 配置目录\")",
+                "POSIX path of (choose folder with prompt \"选择 Nginx 运行目录\")",
             ])
             .output()
             .context("无法打开 macOS 文件夹选择器")?;
@@ -389,10 +414,10 @@ pub(crate) fn pick_directory() -> Result<Option<String>> {
                 "--file-selection",
                 "--directory",
                 "--title",
-                "选择 Nginx 配置目录",
+                "选择 Nginx 运行目录",
             ])
             .output()
-            .context("无法打开目录选择器，请手动输入 Nginx 配置目录")?;
+            .context("无法打开目录选择器，请手动输入 Nginx 运行目录")?;
         if !output.status.success() {
             return Ok(None);
         }
@@ -454,7 +479,7 @@ fn windows_pick_directory_sta() -> Result<Option<String>> {
     if com_result < 0 {
         bail!("无法初始化 Windows 文件夹选择器 ({com_result:#x})");
     }
-    let title: Vec<u16> = "选择 Nginx 配置目录"
+    let title: Vec<u16> = "选择 Nginx 运行目录"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -575,6 +600,19 @@ fn collect_included_files(prefix: &Path, files: &mut Vec<PathBuf>) -> Result<()>
     Ok(())
 }
 
+fn nginx_binary_candidates(root: &Path) -> Vec<PathBuf> {
+    let executable = if cfg!(target_os = "windows") {
+        "nginx.exe"
+    } else {
+        "nginx"
+    };
+    vec![
+        root.join(executable),
+        root.join("sbin").join(executable),
+        root.join("bin").join(executable),
+    ]
+}
+
 fn dumped_config_files(output: &str) -> Vec<PathBuf> {
     output
         .lines()
@@ -666,6 +704,14 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
             let start = index;
             let mut depth = brace_delta(clean);
             index += 1;
+            if depth == 0
+                && lines
+                    .get(index)
+                    .is_some_and(|line| without_comment(line).trim() == "{")
+            {
+                depth = 1;
+                index += 1;
+            }
             while index < lines.len() && depth > 0 {
                 depth += brace_delta(without_comment(lines[index]));
                 index += 1;
@@ -765,6 +811,9 @@ fn directive_value<'a>(line: &'a str, directive: &str) -> Option<&'a str> {
 
 fn is_server_start(line: &str) -> bool {
     let line = line.trim();
+    if line == "server" {
+        return true;
+    }
     line.starts_with("server")
         && line[6..]
             .chars()
@@ -798,21 +847,32 @@ fn backup_path(path: &Path) -> PathBuf {
 }
 
 fn nginx_config_context(config_dir: &Path) -> Option<(PathBuf, PathBuf)> {
-    let direct = config_dir.join("nginx.conf");
-    if direct.is_file() {
-        // When the user picked the conventional `.../conf` directory, nginx's
-        // prefix is its parent so relative includes keep working.
-        if config_dir.file_name().and_then(|name| name.to_str()) == Some("conf") {
-            if let Some(prefix) = config_dir.parent() {
-                return Some((prefix.to_path_buf(), direct));
-            }
-        }
-        return Some((config_dir.to_path_buf(), direct));
+    let mut roots = vec![config_dir.to_path_buf()];
+    let mut current = config_dir;
+    for _ in 0..3 {
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        roots.push(parent.to_path_buf());
+        current = parent;
     }
-    let nested = config_dir.join("conf/nginx.conf");
-    nested
-        .is_file()
-        .then_some((config_dir.to_path_buf(), nested))
+    for root in roots {
+        let candidates = [
+            root.join("nginx.conf"),
+            root.join("conf/nginx.conf"),
+            root.join("etc/nginx/nginx.conf"),
+        ];
+        if let Some(config) = candidates.into_iter().find(|path| path.is_file()) {
+            let parent = config.parent().unwrap_or(&root);
+            let prefix = if parent.file_name().and_then(|name| name.to_str()) == Some("conf") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            return Some((prefix.to_path_buf(), config));
+        }
+    }
+    None
 }
 
 fn replace_proxy_target(line: &mut String, replacement: &str) -> Result<()> {
@@ -1001,6 +1061,43 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["cool.test"]
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_from_nginx_install_directory_with_multiline_server_block() {
+        let root = std::env::temp_dir().join(format!(
+            "bot-gate-nginx-install-test-{}-{}",
+            std::process::id(),
+            unix_test_suffix()
+        ));
+        let conf = root.join("conf");
+        let sites = conf.join("conf.d");
+        fs::create_dir_all(&sites).unwrap();
+        fs::write(
+            conf.join("nginx.conf"),
+            "http {\n    include conf.d/*.conf;\n}\n",
+        )
+        .unwrap();
+        fs::write(
+            sites.join("cool.conf"),
+            "server\n{\n    server_name cool.test;\n    location / {\n        proxy_pass http://127.0.0.1:3000;\n    }\n}\n",
+        )
+        .unwrap();
+
+        let context = nginx_config_context(&root).unwrap();
+        assert_eq!(context.0, root);
+        assert_eq!(context.1, conf.join("nginx.conf"));
+
+        let mut manager = NginxManager::default();
+        manager.configure(root.display().to_string(), None).unwrap();
+        let discovered = manager.scan().unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].host, "cool.test");
+        assert_eq!(discovered[0].target, "http://127.0.0.1:3000");
+        assert!(discovered[0].supported);
+        assert!(manager.last_scan_file_count() >= 2);
+
         let _ = fs::remove_dir_all(root);
     }
 

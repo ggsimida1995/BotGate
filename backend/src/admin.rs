@@ -40,6 +40,7 @@ struct AdminSiteToggleInput {
 #[derive(Debug, Deserialize)]
 struct AdminNginxScanInput {
     config_dir: String,
+    #[serde(default)]
     binary: Option<String>,
 }
 
@@ -816,7 +817,7 @@ pub(crate) async fn admin_nginx_scan(
     {
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"message":format!("无法保存 Nginx 配置目录: {error}")}),
+            serde_json::json!({"message":format!("无法保存 Nginx 运行目录: {error}")}),
         );
     }
     if let Err(error) = state

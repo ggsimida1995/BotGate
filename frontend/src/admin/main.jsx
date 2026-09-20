@@ -484,7 +484,7 @@ function AdminConsole() {
                     <div className="management-panel-head">
                       <SectionTitle icon={<GlobalOutlined />} title="站点路由" description={`${sites.length} 个站点正在管理 · ${nginxInfo.configured ? 'Nginx 已接入' : '尚未接入 Nginx'}`} />
                       <Space>
-                        <Button icon={<FolderOpenOutlined />} onClick={() => { nginxForm.setFieldsValue({ config_dir: nginxInfo.config_dir || '', binary: nginxInfo.binary || '' }); setNginxModal(true); }}>接入 Nginx</Button>
+                        <Button icon={<FolderOpenOutlined />} onClick={() => { nginxForm.setFieldValue('config_dir', nginxInfo.config_dir || ''); setNginxModal(true); }}>导入 Nginx</Button>
                         <Button type="primary" icon={<PlusOutlined />} onClick={() => openAddModal('site')}>手动添加</Button>
                       </Space>
                     </div>
@@ -555,7 +555,7 @@ function AdminConsole() {
         <Modal
           open={nginxModal}
           centered
-          title="接入 Nginx"
+          title="导入 Nginx 站点"
           okText="扫描站点"
           cancelText="取消"
           confirmLoading={nginxScanLoading}
@@ -563,13 +563,10 @@ function AdminConsole() {
           onOk={() => nginxForm.submit()}
         >
           <Form form={nginxForm} layout="vertical" onFinish={scanNginx} onFinishFailed={() => message.warning('请选择或输入有效的 Nginx 目录')}>
-            <Form.Item name="config_dir" label="Nginx 安装或配置目录" rules={[{ required: true, message: '请选择或输入 Nginx 目录' }]}>
+            <Form.Item name="config_dir" label="Nginx 运行目录" rules={[{ required: true, message: '请选择或输入 Nginx 运行目录' }]}>
               <Input.Search placeholder="例如 C:\\nginx 或 /etc/nginx" enterButton="选择" loading={nginxScanLoading} onSearch={pickNginxDirectory} />
             </Form.Item>
-            <Form.Item name="binary" label="Nginx 程序路径（可选）">
-              <Input placeholder="留空则自动查找 nginx.exe 或 nginx" />
-            </Form.Item>
-            <Alert type="info" showIcon message="程序只会接管包含 server_name 和 proxy_pass 的反代站点；静态 root 站点和变量代理会保留原样。" />
+            <Alert type="info" showIcon message="选择 Nginx 安装目录即可，程序会自动查找 conf/nginx.conf、include 配置和 nginx 可执行文件；只有标准 proxy_pass 反代站点可以接管。" />
           </Form>
         </Modal>
         <Modal
