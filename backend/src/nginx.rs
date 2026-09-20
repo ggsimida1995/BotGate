@@ -149,6 +149,7 @@ impl NginxManager {
             self.last_scan_file_count = 0;
             return Ok(Vec::new());
         };
+        let has_selected_config = selected_config.is_some();
         let mut files = if let Some(config_file) = selected_config {
             vec![config_file]
         } else {
@@ -165,10 +166,12 @@ impl NginxManager {
             bail!("目录中没有找到 nginx.conf 或 *.conf 文件");
         }
         collect_included_files(&prefix_dir, &mut files)?;
-        if let Some(main_config) = main_config.as_deref() {
-            for file in self.effective_config_files(&prefix_dir, main_config) {
-                if file.is_file() && !files.contains(&file) {
-                    files.push(file);
+        if !has_selected_config {
+            if let Some(main_config) = main_config.as_deref() {
+                for file in self.effective_config_files(&prefix_dir, main_config) {
+                    if file.is_file() && !files.contains(&file) {
+                        files.push(file);
+                    }
                 }
             }
         }
@@ -342,7 +345,7 @@ impl NginxManager {
         let context = nginx_config_context(config_dir);
         let test = if let Some((prefix_dir, config)) = context.as_ref() {
             let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
-            Command::new(&binary)
+            nginx_command(&binary)
                 .args(["-p"])
                 .arg(prefix_dir)
                 .args(["-t", "-c"])
@@ -350,7 +353,7 @@ impl NginxManager {
                 .output()
                 .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
         } else {
-            Command::new(&binary)
+            nginx_command(&binary)
                 .args(["-t"])
                 .output()
                 .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
@@ -363,7 +366,7 @@ impl NginxManager {
         }
         let reload = if let Some((prefix_dir, config)) = context.as_ref() {
             let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
-            Command::new(&binary)
+            nginx_command(&binary)
                 .args(["-p"])
                 .arg(prefix_dir)
                 .args(["-s", "reload", "-c"])
@@ -371,7 +374,7 @@ impl NginxManager {
                 .output()
                 .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
         } else {
-            Command::new(&binary)
+            nginx_command(&binary)
                 .args(["-s", "reload"])
                 .output()
                 .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
@@ -430,7 +433,7 @@ impl NginxManager {
 
     fn effective_config_files(&self, prefix_dir: &Path, config: &Path) -> Vec<PathBuf> {
         let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
-        let output = match Command::new(self.binary_path())
+        let output = match nginx_command(&self.binary_path())
             .args(["-p"])
             .arg(prefix_dir)
             .args(["-T", "-c"])
@@ -943,7 +946,8 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
             if let Some((offset, target)) = proxies.first().cloned() {
                 for host in hosts.iter().cloned() {
                     let managed = block.iter().any(|line| line.contains("bot-gate: managed"));
-                    let supported = proxies.len() == 1
+                    let supported = host != "_"
+                        && proxies.len() == 1
                         && !target.contains('$')
                         && Url::parse(&target).is_ok_and(|url| {
                             url.scheme() == "http" && (url.path().is_empty() || url.path() == "/")
@@ -993,9 +997,22 @@ fn server_names(block: &[&str]) -> Vec<String> {
         .iter()
         .filter_map(|line| directive_value(without_comment(line), "server_name"))
         .flat_map(|value| value.split_whitespace())
-        .filter(|host| *host != "_" && !host.starts_with('$') && !host.contains('*'))
+        .filter(|host| !host.starts_with('$') && !host.contains('*'))
         .map(str::to_ascii_lowercase)
         .collect()
+}
+
+fn nginx_command(binary: &Path) -> Command {
+    #[cfg(target_os = "windows")]
+    let mut command = Command::new(binary);
+    #[cfg(not(target_os = "windows"))]
+    let command = Command::new(binary);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x0800_0000);
+    }
+    command
 }
 
 fn parse_proxy_pass(line: &str) -> Option<String> {
@@ -1163,6 +1180,15 @@ mod tests {
         assert_eq!(sites[0].target, "http://127.0.0.1:3000");
         assert!(sites[0].supported);
         assert!(!sites[0].protected);
+    }
+
+    #[test]
+    fn keeps_catch_all_server_as_unsupported_instead_of_hiding_it() {
+        let source = "server {\n    listen 18081;\n    server_name _;\n    location /api/ {\n        proxy_pass http://127.0.0.1:8001/;\n    }\n    location /socket {\n        proxy_pass http://127.0.0.1:8001/socket;\n    }\n}\n";
+        let sites = parse_file(Path::new("nginx-test.conf"), source);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].host, "_");
+        assert!(!sites[0].supported);
     }
 
     #[test]
