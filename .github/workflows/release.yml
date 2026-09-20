@@ -81,10 +81,10 @@ jobs:
           test -f desktop/resources/frontend/dist/challenge.html
           sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$version\"/" desktop/tauri.conf.json
           sed -i '' "s/^version = \"[^\"]*\"/version = \"$version\"/" desktop/Cargo.toml
-          (cd desktop && cargo tauri build --ci --bundles dmg)
-          dmg=$(find desktop/target/release/bundle/dmg -name '*.dmg' -print -quit)
-          test -n "$dmg"
-          cp "$dmg" "BotGate-${version}-macos-arm64.dmg"
+          (cd desktop && cargo tauri build --ci --bundles app)
+          app=$(find desktop/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)
+          test -n "$app"
+          hdiutil create -volname "网站卫士" -srcfolder "$app" -ov -format UDZO "BotGate-${version}-macos-arm64.dmg"
           shasum -a 256 "BotGate-${version}-macos-arm64.dmg" > "BotGate-${version}-macos-arm64.dmg.sha256"
       - uses: softprops/action-gh-release@v2
         with:
