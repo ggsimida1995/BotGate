@@ -71,6 +71,10 @@ impl NginxManager {
         self.ignored_hosts = hosts;
     }
 
+    pub(crate) fn clear_ignored_hosts(&mut self) {
+        self.ignored_hosts.clear();
+    }
+
     pub(crate) fn ignored_hosts(&self) -> Vec<String> {
         self.ignored_hosts.iter().cloned().collect()
     }

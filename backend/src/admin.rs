@@ -802,6 +802,7 @@ pub(crate) async fn admin_nginx_scan(
         };
         manager.configure(config_dir, binary)?;
         if let Some(config_file) = config_file {
+            manager.clear_ignored_hosts();
             manager.set_config_file(config_file)?;
         }
         let sites = manager.scan()?;
@@ -841,6 +842,14 @@ pub(crate) async fn admin_nginx_scan(
             StatusCode::INTERNAL_SERVER_ERROR,
             serde_json::json!({"message":format!("无法保存导入配置路径: {error}")}),
         );
+    }
+    if input.config_file.is_some() {
+        if let Err(error) = state.storage.set_setting("nginx.ignored_hosts", "[]") {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":format!("无法清理 Nginx 站点忽略列表: {error}")}),
+            );
+        }
     }
     if let Err(error) = state
         .storage
