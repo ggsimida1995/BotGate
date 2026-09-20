@@ -82,13 +82,11 @@ impl NginxManager {
 
     pub(crate) fn configure(&mut self, config_dir: String, binary: Option<String>) -> Result<()> {
         let config_dir = PathBuf::from(config_dir.trim());
-        if !config_dir.is_dir() {
-            bail!("Nginx 运行目录不存在: {}", config_dir.display());
+        if !config_dir.is_dir() && !config_dir.is_file() {
+            bail!("Nginx 运行目录或配置文件不存在: {}", config_dir.display());
         }
         if nginx_config_context(&config_dir).is_none() {
-            bail!(
-                "未找到 nginx.conf，请选择 Nginx 运行目录（例如 nginx、/etc/nginx 或包含 conf/nginx.conf 的目录）"
-            );
+            bail!("未找到 nginx.conf，请选择 Nginx 运行目录，或直接选择实际的 Nginx 配置文件");
         }
         if self.config_dir.as_ref() != Some(&config_dir) {
             self.ignored_hosts.clear();
@@ -104,17 +102,24 @@ impl NginxManager {
         let config_dir = self
             .config_dir
             .as_deref()
-            .context("请先选择 Nginx 运行目录")?;
-        if !config_dir.is_dir() {
-            bail!("Nginx 运行目录不存在: {}", config_dir.display());
+            .context("请先选择 Nginx 运行目录或配置文件")?;
+        if !config_dir.is_dir() && !config_dir.is_file() {
+            bail!("Nginx 运行目录或配置文件不存在: {}", config_dir.display());
         }
-        let (prefix_dir, main_config) = nginx_config_context(config_dir).context(
-            "未找到 nginx.conf，请选择 Nginx 运行目录（例如 nginx、/etc/nginx 或包含 conf/nginx.conf 的目录）",
-        )?;
-        let mut files = Vec::new();
-        collect_config_files(config_dir, &mut files)?;
-        if !files.contains(&main_config) {
-            files.push(main_config.clone());
+        let (prefix_dir, main_config) = nginx_config_context(config_dir)
+            .context("未找到 nginx.conf，请选择 Nginx 运行目录，或直接选择实际的 Nginx 配置文件")?;
+        let mut files = if config_dir.is_file() {
+            vec![main_config.clone()]
+        } else {
+            let mut files = Vec::new();
+            collect_config_files(config_dir, &mut files)?;
+            if !files.contains(&main_config) {
+                files.push(main_config.clone());
+            }
+            files
+        };
+        if files.is_empty() {
+            bail!("目录中没有找到 nginx.conf 或 *.conf 文件");
         }
         collect_included_files(&prefix_dir, &mut files)?;
         for file in self.effective_config_files(&prefix_dir, &main_config) {
@@ -339,8 +344,13 @@ impl NginxManager {
             }
         }
         if let Some(config_dir) = self.config_dir.as_deref() {
-            let mut roots = vec![config_dir.to_path_buf()];
-            if let Some(parent) = config_dir.parent() {
+            let root = if config_dir.is_file() {
+                config_dir.parent().unwrap_or(config_dir)
+            } else {
+                config_dir
+            };
+            let mut roots = vec![root.to_path_buf()];
+            if let Some(parent) = root.parent() {
                 roots.push(parent.to_path_buf());
             }
             if let Some((prefix, _)) = nginx_config_context(config_dir) {
@@ -418,6 +428,50 @@ pub(crate) fn pick_directory() -> Result<Option<String>> {
             ])
             .output()
             .context("无法打开目录选择器，请手动输入 Nginx 运行目录")?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
+    Ok(None)
+}
+
+pub(crate) fn pick_config_file() -> Result<Option<String>> {
+    #[cfg(target_os = "windows")]
+    {
+        return windows_pick_config_file();
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let output = Command::new("osascript")
+            .args([
+                "-e",
+                "POSIX path of (choose file with prompt \"选择 Nginx 配置文件\")",
+            ])
+            .output()
+            .context("无法打开 macOS 配置文件选择器")?;
+        if !output.status.success() {
+            return Ok(None);
+        }
+        return Ok(Some(
+            String::from_utf8_lossy(&output.stdout).trim().to_string(),
+        ));
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let output = Command::new("zenity")
+            .args([
+                "--file-selection",
+                "--title",
+                "选择 Nginx 配置文件",
+                "--file-filter",
+                "Nginx 配置 (*.conf) | *.conf",
+            ])
+            .output()
+            .context("无法打开配置文件选择器，请手动输入 Nginx 配置文件")?;
         if !output.status.success() {
             return Ok(None);
         }
@@ -512,6 +566,96 @@ fn windows_pick_directory_sta() -> Result<Option<String>> {
         .unwrap_or(path.len());
     let path = String::from_utf16(&path[..length]).context("Windows 路径编码无效")?;
     Ok((!path.is_empty()).then_some(path))
+}
+
+#[cfg(target_os = "windows")]
+fn windows_pick_config_file() -> Result<Option<String>> {
+    std::thread::spawn(windows_pick_config_file_sta)
+        .join()
+        .map_err(|_| anyhow::anyhow!("Windows 配置文件选择器线程异常退出"))?
+}
+
+#[cfg(target_os = "windows")]
+fn windows_pick_config_file_sta() -> Result<Option<String>> {
+    use std::{ffi::c_void, ptr};
+
+    #[repr(C)]
+    struct OpenFileNameW {
+        l_struct_size: u32,
+        hwnd_owner: isize,
+        h_instance: isize,
+        filter: *const u16,
+        custom_filter: *mut u16,
+        max_custom_filter: u32,
+        filter_index: u32,
+        file: *mut u16,
+        max_file: u32,
+        file_title: *mut u16,
+        max_file_title: u32,
+        initial_dir: *const u16,
+        title: *const u16,
+        flags: u32,
+        file_offset: u16,
+        file_extension: u16,
+        def_ext: *const u16,
+        data: isize,
+        hook: *const c_void,
+        template_name: *const u16,
+        reserved: *mut c_void,
+        reserved2: u32,
+        flags_ex: u32,
+    }
+
+    #[link(name = "comdlg32")]
+    extern "system" {
+        fn GetOpenFileNameW(file_name: *mut OpenFileNameW) -> i32;
+    }
+
+    const OFN_FILEMUSTEXIST: u32 = 0x0000_1000;
+    const OFN_PATHMUSTEXIST: u32 = 0x0000_0800;
+    let filter: Vec<u16> = "Nginx 配置文件 (*.conf)\0*.conf\0所有文件\0*.*\0\0"
+        .encode_utf16()
+        .collect();
+    let title: Vec<u16> = "选择 Nginx 配置文件"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut file = vec![0u16; 32_768];
+    let mut info = OpenFileNameW {
+        l_struct_size: std::mem::size_of::<OpenFileNameW>() as u32,
+        hwnd_owner: 0,
+        h_instance: 0,
+        filter: filter.as_ptr(),
+        custom_filter: ptr::null_mut(),
+        max_custom_filter: 0,
+        filter_index: 1,
+        file: file.as_mut_ptr(),
+        max_file: file.len() as u32,
+        file_title: ptr::null_mut(),
+        max_file_title: 0,
+        initial_dir: ptr::null(),
+        title: title.as_ptr(),
+        flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        file_offset: 0,
+        file_extension: 0,
+        def_ext: ptr::null(),
+        data: 0,
+        hook: ptr::null(),
+        template_name: ptr::null(),
+        reserved: ptr::null_mut(),
+        reserved2: 0,
+        flags_ex: 0,
+    };
+    if unsafe { GetOpenFileNameW(&mut info) } == 0 {
+        return Ok(None);
+    }
+    let length = file
+        .iter()
+        .position(|value| *value == 0)
+        .unwrap_or(file.len());
+    Ok(Some(
+        String::from_utf16(&file[..length]).context("Windows 路径编码无效")?,
+    ))
 }
 
 impl SiteRef {
@@ -847,6 +991,15 @@ fn backup_path(path: &Path) -> PathBuf {
 }
 
 fn nginx_config_context(config_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+    if config_dir.is_file() {
+        let parent = config_dir.parent()?;
+        let prefix = if parent.file_name().and_then(|name| name.to_str()) == Some("conf") {
+            parent.parent().unwrap_or(parent)
+        } else {
+            parent
+        };
+        return Some((prefix.to_path_buf(), config_dir.to_path_buf()));
+    }
     let mut roots = vec![config_dir.to_path_buf()];
     let mut current = config_dir;
     for _ in 0..3 {
@@ -1097,6 +1250,40 @@ mod tests {
         assert_eq!(discovered[0].target, "http://127.0.0.1:3000");
         assert!(discovered[0].supported);
         assert!(manager.last_scan_file_count() >= 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_a_selected_config_file_and_its_includes_only() {
+        let root = std::env::temp_dir().join(format!(
+            "bot-gate-nginx-file-test-{}-{}",
+            std::process::id(),
+            unix_test_suffix()
+        ));
+        let sites = root.join("sites");
+        fs::create_dir_all(&sites).unwrap();
+        let config = root.join("custom-nginx.conf");
+        fs::write(&config, "http { include sites/*.conf; }\n").unwrap();
+        fs::write(
+            sites.join("cool.conf"),
+            "server { server_name cool.test; proxy_pass http://127.0.0.1:3000; }\n",
+        )
+        .unwrap();
+        fs::write(
+            root.join("unrelated.conf"),
+            "server { server_name unrelated.test; proxy_pass http://127.0.0.1:3001; }\n",
+        )
+        .unwrap();
+
+        let mut manager = NginxManager::default();
+        manager
+            .configure(config.display().to_string(), None)
+            .unwrap();
+        let discovered = manager.scan().unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].host, "cool.test");
+        assert_eq!(manager.last_scan_file_count(), 2);
 
         let _ = fs::remove_dir_all(root);
     }

@@ -31,10 +31,10 @@ use admin::{
     admin_delete_ban, admin_delete_site, admin_delete_whitelist, admin_gateway_start,
     admin_gateway_status, admin_gateway_stop, admin_interception_detail, admin_list_bans,
     admin_list_challenges, admin_list_interceptions, admin_list_requests, admin_list_sites,
-    admin_list_whitelist, admin_nginx_delete, admin_nginx_pick, admin_nginx_scan,
-    admin_nginx_toggle, admin_page, admin_reload_config, admin_request_detail, admin_save_ban,
-    admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site, admin_update_apply,
-    admin_update_check, admin_update_progress,
+    admin_list_whitelist, admin_nginx_delete, admin_nginx_pick, admin_nginx_pick_config,
+    admin_nginx_scan, admin_nginx_toggle, admin_page, admin_reload_config, admin_request_detail,
+    admin_save_ban, admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site,
+    admin_update_apply, admin_update_check, admin_update_progress,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -892,6 +892,7 @@ async fn run() -> Result<()> {
             .route("/api/sites/delete", post(admin_delete_site))
             .route("/api/nginx/scan", post(admin_nginx_scan))
             .route("/api/nginx/pick", post(admin_nginx_pick))
+            .route("/api/nginx/pick-config", post(admin_nginx_pick_config))
             .route("/api/nginx/toggle", post(admin_nginx_toggle))
             .route("/api/nginx/delete", post(admin_nginx_delete))
             .route("/api/bans", get(admin_list_bans).post(admin_save_ban))

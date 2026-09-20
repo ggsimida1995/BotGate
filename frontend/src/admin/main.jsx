@@ -29,6 +29,7 @@ import {
   CloudOutlined,
   CloudDownloadOutlined,
   DeleteOutlined,
+  FileSearchOutlined,
   FolderOpenOutlined,
   GlobalOutlined,
   KeyOutlined,
@@ -257,6 +258,22 @@ function AdminConsole() {
         nginxForm.setFieldValue('config_dir', result.path);
       } else {
         message.info('已取消选择目录');
+      }
+    } catch (cause) {
+      message.error(cause.message);
+    } finally {
+      setNginxScanLoading(false);
+    }
+  }
+
+  async function pickNginxConfigFile() {
+    setNginxScanLoading(true);
+    try {
+      const result = await api('/api/nginx/pick-config', { method: 'POST' });
+      if (result.path) {
+        nginxForm.setFieldValue('config_dir', result.path);
+      } else {
+        message.info('已取消选择配置文件');
       }
     } catch (cause) {
       message.error(cause.message);
@@ -562,11 +579,15 @@ function AdminConsole() {
           onCancel={() => setNginxModal(false)}
           onOk={() => nginxForm.submit()}
         >
-          <Form form={nginxForm} layout="vertical" onFinish={scanNginx} onFinishFailed={() => message.warning('请选择或输入有效的 Nginx 目录')}>
-            <Form.Item name="config_dir" label="Nginx 运行目录" rules={[{ required: true, message: '请选择或输入 Nginx 运行目录' }]}>
-              <Input.Search placeholder="例如 C:\\nginx 或 /etc/nginx" enterButton="选择" loading={nginxScanLoading} onSearch={pickNginxDirectory} />
+          <Form form={nginxForm} layout="vertical" onFinish={scanNginx} onFinishFailed={() => message.warning('请选择或输入有效的 Nginx 运行目录或配置文件')}>
+            <Form.Item name="config_dir" label="Nginx 运行目录或配置文件" rules={[{ required: true, message: '请选择或输入 Nginx 运行目录或配置文件' }]}>
+              <Input placeholder="例如 C:\\nginx、/etc/nginx 或 nginx.conf" />
             </Form.Item>
-            <Alert type="info" showIcon message="选择 Nginx 安装目录即可，程序会自动查找 conf/nginx.conf、include 配置和 nginx 可执行文件；只有标准 proxy_pass 反代站点可以接管。" />
+            <Space>
+              <Button icon={<FolderOpenOutlined />} loading={nginxScanLoading} onClick={pickNginxDirectory}>选择运行目录</Button>
+              <Button icon={<FileSearchOutlined />} loading={nginxScanLoading} onClick={pickNginxConfigFile}>选择配置文件</Button>
+            </Space>
+            <Alert type="info" showIcon message="选择安装目录会自动查找 nginx.conf 和 include 配置；也可以直接选择实际配置文件，程序只导入该文件及其 include 的站点。" />
           </Form>
         </Modal>
         <Modal

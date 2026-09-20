@@ -865,6 +865,30 @@ pub(crate) async fn admin_nginx_pick(
     }
 }
 
+pub(crate) async fn admin_nginx_pick_config(
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let picker = tokio::task::spawn_blocking(crate::nginx::pick_config_file).await;
+    match picker {
+        Ok(Ok(Some(path))) => json_response(StatusCode::OK, serde_json::json!({"path":path})),
+        Ok(Ok(None)) => json_response(StatusCode::OK, serde_json::json!({"path":null})),
+        Ok(Err(error)) => json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"message":error.to_string()}),
+        ),
+        Err(error) => {
+            error!(error = %error, "Nginx config file picker task failed");
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 配置文件选择器异常退出"}),
+            )
+        }
+    }
+}
+
 pub(crate) async fn admin_nginx_toggle(
     State(state): State<Arc<AdminState>>,
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
