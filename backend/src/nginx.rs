@@ -39,6 +39,7 @@ struct SiteRef {
 #[derive(Debug, Default)]
 pub(crate) struct NginxManager {
     config_dir: Option<PathBuf>,
+    selected_config: Option<PathBuf>,
     binary: Option<PathBuf>,
     sites: HashMap<String, SiteRef>,
     ignored_hosts: HashSet<String>,
@@ -47,10 +48,16 @@ pub(crate) struct NginxManager {
 
 impl NginxManager {
     pub(crate) fn new(config_dir: Option<String>, binary: Option<String>) -> Self {
+        let configured_path = config_dir
+            .filter(|value| !value.trim().is_empty())
+            .map(PathBuf::from);
+        let (config_dir, selected_config) = match configured_path {
+            Some(path) if path.is_file() => (path.parent().map(Path::to_path_buf), Some(path)),
+            path => (path, None),
+        };
         Self {
-            config_dir: config_dir
-                .filter(|value| !value.trim().is_empty())
-                .map(PathBuf::from),
+            config_dir,
+            selected_config,
             binary: binary
                 .filter(|value| !value.trim().is_empty())
                 .map(PathBuf::from),
@@ -80,21 +87,44 @@ impl NginxManager {
         self.binary.as_deref()
     }
 
+    pub(crate) fn config_file(&self) -> Option<&Path> {
+        self.selected_config.as_deref()
+    }
+
     pub(crate) fn configure(&mut self, config_dir: String, binary: Option<String>) -> Result<()> {
-        let config_dir = PathBuf::from(config_dir.trim());
-        if !config_dir.is_dir() && !config_dir.is_file() {
-            bail!("Nginx 运行目录或配置文件不存在: {}", config_dir.display());
+        let selected_config = PathBuf::from(config_dir.trim());
+        if !selected_config.is_dir() && !selected_config.is_file() {
+            bail!(
+                "Web 服务目录或配置文件不存在: {}",
+                selected_config.display()
+            );
         }
-        if nginx_config_context(&config_dir).is_none() {
-            bail!("未找到 nginx.conf，请选择 Nginx 运行目录，或直接选择实际的 Nginx 配置文件");
-        }
+        let (config_dir, selected_config) = if selected_config.is_file() {
+            let service_dir = selected_config
+                .parent()
+                .context("配置文件没有有效的 Web 服务目录")?
+                .to_path_buf();
+            (service_dir, Some(selected_config))
+        } else {
+            (selected_config, None)
+        };
         if self.config_dir.as_ref() != Some(&config_dir) {
             self.ignored_hosts.clear();
         }
         self.config_dir = Some(config_dir);
+        self.selected_config = selected_config;
         self.binary = binary
             .filter(|value| !value.trim().is_empty())
             .map(PathBuf::from);
+        Ok(())
+    }
+
+    pub(crate) fn set_config_file(&mut self, config_file: String) -> Result<()> {
+        let root = self
+            .config_dir
+            .as_deref()
+            .context("请先设置 Web 服务目录")?;
+        self.selected_config = Some(validate_config_file(root, Path::new(config_file.trim()))?);
         Ok(())
     }
 
@@ -102,19 +132,32 @@ impl NginxManager {
         let config_dir = self
             .config_dir
             .as_deref()
-            .context("请先选择 Nginx 运行目录或配置文件")?;
-        if !config_dir.is_dir() && !config_dir.is_file() {
-            bail!("Nginx 运行目录或配置文件不存在: {}", config_dir.display());
+            .context("请先设置 Web 服务目录")?;
+        if !config_dir.is_dir() {
+            bail!("Web 服务目录不存在: {}", config_dir.display());
         }
-        let (prefix_dir, main_config) = nginx_config_context(config_dir)
-            .context("未找到 nginx.conf，请选择 Nginx 运行目录，或直接选择实际的 Nginx 配置文件")?;
-        let mut files = if config_dir.is_file() {
-            vec![main_config.clone()]
+        let selected_config = self.selected_config.clone();
+        let (prefix_dir, main_config) = if let Some(config_file) = selected_config.as_deref() {
+            let prefix = nginx_config_context(config_dir)
+                .map(|(prefix, _)| prefix)
+                .unwrap_or_else(|| config_dir.to_path_buf());
+            (prefix, Some(config_file.to_path_buf()))
+        } else if let Some((prefix, main)) = nginx_config_context(config_dir) {
+            (prefix, Some(main))
+        } else {
+            self.sites.clear();
+            self.last_scan_file_count = 0;
+            return Ok(Vec::new());
+        };
+        let mut files = if let Some(config_file) = selected_config {
+            vec![config_file]
         } else {
             let mut files = Vec::new();
             collect_config_files(config_dir, &mut files)?;
-            if !files.contains(&main_config) {
-                files.push(main_config.clone());
+            if let Some(main_config) = main_config.as_ref() {
+                if !files.contains(main_config) {
+                    files.push(main_config.clone());
+                }
             }
             files
         };
@@ -122,9 +165,11 @@ impl NginxManager {
             bail!("目录中没有找到 nginx.conf 或 *.conf 文件");
         }
         collect_included_files(&prefix_dir, &mut files)?;
-        for file in self.effective_config_files(&prefix_dir, &main_config) {
-            if file.is_file() && !files.contains(&file) {
-                files.push(file);
+        if let Some(main_config) = main_config.as_deref() {
+            for file in self.effective_config_files(&prefix_dir, main_config) {
+                if file.is_file() && !files.contains(&file) {
+                    files.push(file);
+                }
             }
         }
         files.sort();
@@ -292,34 +337,45 @@ impl NginxManager {
         let config_dir = self
             .config_dir
             .as_deref()
-            .context("请先选择 Nginx 运行目录")?;
-        let (prefix_dir, config) =
-            nginx_config_context(config_dir).context("Nginx 运行目录中缺少 nginx.conf")?;
-        let relative_config = config.strip_prefix(&prefix_dir).unwrap_or(&config);
+            .context("请先设置 Web 服务目录")?;
         let binary = self.binary_path();
-        if !config.is_file() {
-            bail!("Nginx 运行目录中缺少 nginx.conf: {}", config.display());
-        }
-        let test = Command::new(&binary)
-            .args(["-p"])
-            .arg(&prefix_dir)
-            .args(["-t", "-c"])
-            .arg(relative_config)
-            .output()
-            .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?;
+        let context = nginx_config_context(config_dir);
+        let test = if let Some((prefix_dir, config)) = context.as_ref() {
+            let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
+            Command::new(&binary)
+                .args(["-p"])
+                .arg(prefix_dir)
+                .args(["-t", "-c"])
+                .arg(relative_config)
+                .output()
+                .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
+        } else {
+            Command::new(&binary)
+                .args(["-t"])
+                .output()
+                .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
+        };
         if !test.status.success() {
             bail!(
                 "Nginx 配置检查失败: {}",
                 command_output(&test.stdout, &test.stderr)
             );
         }
-        let reload = Command::new(&binary)
-            .args(["-p"])
-            .arg(&prefix_dir)
-            .args(["-s", "reload", "-c"])
-            .arg(relative_config)
-            .output()
-            .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?;
+        let reload = if let Some((prefix_dir, config)) = context.as_ref() {
+            let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
+            Command::new(&binary)
+                .args(["-p"])
+                .arg(prefix_dir)
+                .args(["-s", "reload", "-c"])
+                .arg(relative_config)
+                .output()
+                .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
+        } else {
+            Command::new(&binary)
+                .args(["-s", "reload"])
+                .output()
+                .with_context(|| format!("无法执行 Nginx: {}", binary.display()))?
+        };
         if !reload.status.success() {
             bail!(
                 "Nginx reload 失败: {}",
@@ -406,7 +462,7 @@ pub(crate) fn pick_directory() -> Result<Option<String>> {
         let output = Command::new("osascript")
             .args([
                 "-e",
-                "POSIX path of (choose folder with prompt \"选择 Nginx 运行目录\")",
+                "POSIX path of (choose folder with prompt \"选择 Web 服务目录\")",
             ])
             .output()
             .context("无法打开 macOS 文件夹选择器")?;
@@ -424,10 +480,10 @@ pub(crate) fn pick_directory() -> Result<Option<String>> {
                 "--file-selection",
                 "--directory",
                 "--title",
-                "选择 Nginx 运行目录",
+                "选择 Web 服务目录",
             ])
             .output()
-            .context("无法打开目录选择器，请手动输入 Nginx 运行目录")?;
+            .context("无法打开目录选择器，请手动输入 Web 服务目录")?;
         if !output.status.success() {
             return Ok(None);
         }
@@ -437,6 +493,20 @@ pub(crate) fn pick_directory() -> Result<Option<String>> {
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos", unix)))]
     Ok(None)
+}
+
+pub(crate) fn validate_config_file(root: &Path, config_file: &Path) -> Result<PathBuf> {
+    let root = fs::canonicalize(root)
+        .with_context(|| format!("Web 服务目录不存在: {}", root.display()))?;
+    let config_file = fs::canonicalize(config_file)
+        .with_context(|| format!("Nginx 配置文件不存在: {}", config_file.display()))?;
+    if !config_file.is_file() {
+        bail!("Nginx 配置文件不存在: {}", config_file.display());
+    }
+    if !config_file.starts_with(&root) {
+        bail!("只能导入 Web 服务目录内的配置文件");
+    }
+    Ok(config_file)
 }
 
 pub(crate) fn pick_config_file() -> Result<Option<String>> {
@@ -533,7 +603,7 @@ fn windows_pick_directory_sta() -> Result<Option<String>> {
     if com_result < 0 {
         bail!("无法初始化 Windows 文件夹选择器 ({com_result:#x})");
     }
-    let title: Vec<u16> = "选择 Nginx 运行目录"
+    let title: Vec<u16> = "选择 Web 服务目录"
         .encode_utf16()
         .chain(std::iter::once(0))
         .collect();
@@ -1286,6 +1356,55 @@ mod tests {
         assert_eq!(manager.last_scan_file_count(), 2);
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scans_a_web_service_directory_with_a_standalone_server_config() {
+        let root = std::env::temp_dir().join(format!(
+            "bot-gate-web-service-test-{}-{}",
+            std::process::id(),
+            unix_test_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("cool.conf"),
+            "server {\n    server_name cool.test;\n    location / {\n        proxy_pass http://127.0.0.1:3000;\n    }\n}\n",
+        )
+        .unwrap();
+
+        let mut manager = NginxManager::default();
+        manager.configure(root.display().to_string(), None).unwrap();
+        assert!(manager.scan().unwrap().is_empty());
+        manager
+            .set_config_file(root.join("cool.conf").display().to_string())
+            .unwrap();
+        let discovered = manager.scan().unwrap();
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].host, "cool.test");
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn rejects_a_config_file_outside_the_web_service_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "bot-gate-web-service-boundary-test-{}-{}",
+            std::process::id(),
+            unix_test_suffix()
+        ));
+        let outside = root.with_extension("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        let config = outside.join("outside.conf");
+        fs::write(&config, "server { server_name outside.test; }\n").unwrap();
+
+        let error = validate_config_file(&root, &config)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("只能导入 Web 服务目录内的配置文件"));
+
+        let _ = fs::remove_dir_all(root);
+        let _ = fs::remove_dir_all(outside);
     }
 
     fn unix_test_suffix() -> u128 {

@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, SocketAddr},
+    path::Path as FsPath,
     sync::Arc,
 };
 
@@ -42,6 +43,13 @@ struct AdminNginxScanInput {
     config_dir: String,
     #[serde(default)]
     binary: Option<String>,
+    #[serde(default)]
+    config_file: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminNginxPickConfigInput {
+    config_dir: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -753,6 +761,7 @@ pub(crate) async fn admin_list_sites(
                     "nginx": {
                         "configured": nginx.as_ref().is_some_and(|manager| manager.config_dir().is_some()),
                         "config_dir": nginx.as_ref().and_then(|manager| manager.config_dir()).map(|path| path.display().to_string()),
+                        "config_file": nginx.as_ref().and_then(|manager| manager.config_file()).map(|path| path.display().to_string()),
                         "binary": nginx.as_ref().and_then(|manager| manager.binary()).map(|path| path.display().to_string()),
                         "error": nginx_error
                     },
@@ -784,6 +793,7 @@ pub(crate) async fn admin_nginx_scan(
     };
     let config_dir = input.config_dir.trim().to_string();
     let binary = input.binary.clone();
+    let config_file = input.config_file.clone();
     let nginx = state.nginx.clone();
     let scan = tokio::task::spawn_blocking(move || {
         let mut manager = match nginx.lock() {
@@ -791,6 +801,9 @@ pub(crate) async fn admin_nginx_scan(
             Err(_) => bail!("Nginx 扫描状态不可用"),
         };
         manager.configure(config_dir, binary)?;
+        if let Some(config_file) = config_file {
+            manager.set_config_file(config_file)?;
+        }
         let sites = manager.scan()?;
         Ok::<_, anyhow::Error>((sites, manager.last_scan_file_count()))
     })
@@ -817,7 +830,16 @@ pub(crate) async fn admin_nginx_scan(
     {
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"message":format!("无法保存 Nginx 运行目录: {error}")}),
+            serde_json::json!({"message":format!("无法保存 Web 服务目录: {error}")}),
+        );
+    }
+    if let Err(error) = state.storage.set_setting(
+        "nginx.config_file",
+        input.config_file.as_deref().unwrap_or(""),
+    ) {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":format!("无法保存导入配置路径: {error}")}),
         );
     }
     if let Err(error) = state
@@ -841,6 +863,72 @@ pub(crate) async fn admin_nginx_scan(
     )
 }
 
+pub(crate) async fn admin_nginx_configure(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let input: AdminNginxScanInput = match admin_input(request).await {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    let config_dir = input.config_dir.trim().to_string();
+    if !FsPath::new(&config_dir).is_dir() {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            serde_json::json!({"message":"请选择有效的 Web 服务目录"}),
+        );
+    }
+    let binary = input.binary.clone();
+    let nginx = state.nginx.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let mut manager = nginx
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Nginx 扫描状态不可用"))?;
+        manager.configure(config_dir, binary)?;
+        Ok::<_, anyhow::Error>(())
+    })
+    .await;
+    match result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"message":error.to_string()}),
+            )
+        }
+        Err(error) => {
+            error!(error = %error, "Nginx configure task failed");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Web 服务目录设置任务异常退出"}),
+            );
+        }
+    }
+    if let Err(error) = state
+        .storage
+        .set_setting("nginx.config_dir", &input.config_dir)
+    {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":format!("无法保存 Web 服务目录: {error}")}),
+        );
+    }
+    if let Err(error) = state.storage.set_setting("nginx.config_file", "") {
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":format!("无法清空导入配置路径: {error}")}),
+        );
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"configured":true,"config_dir":input.config_dir}),
+    )
+}
+
 pub(crate) async fn admin_nginx_pick(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
 ) -> Response<Body> {
@@ -859,7 +947,7 @@ pub(crate) async fn admin_nginx_pick(
             error!(error = %error, "Nginx directory picker task failed");
             json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
-                serde_json::json!({"message":"Windows 文件夹选择器异常退出"}),
+                serde_json::json!({"message":"Web 服务目录选择器异常退出"}),
             )
         }
     }
@@ -867,11 +955,25 @@ pub(crate) async fn admin_nginx_pick(
 
 pub(crate) async fn admin_nginx_pick_config(
     ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
 ) -> Response<Body> {
     if let Some(response) = admin_access(remote) {
         return response;
     }
-    let picker = tokio::task::spawn_blocking(crate::nginx::pick_config_file).await;
+    let input: AdminNginxPickConfigInput = match admin_input(request).await {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    let root = FsPath::new(input.config_dir.trim()).to_path_buf();
+    let picker = tokio::task::spawn_blocking(move || {
+        let path = crate::nginx::pick_config_file()?;
+        path.map(|path| {
+            crate::nginx::validate_config_file(&root, FsPath::new(&path))
+                .map(|path| path.display().to_string())
+        })
+        .transpose()
+    })
+    .await;
     match picker {
         Ok(Ok(Some(path))) => json_response(StatusCode::OK, serde_json::json!({"path":path})),
         Ok(Ok(None)) => json_response(StatusCode::OK, serde_json::json!({"path":null})),

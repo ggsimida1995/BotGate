@@ -176,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "bot-gate"
-version = "0.2.24"
+version = "0.2.25"
 dependencies = [
  "anyhow",
  "axum",

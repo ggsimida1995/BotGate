@@ -91,7 +91,6 @@ function AdminConsole() {
   const [updateLoading, setUpdateLoading] = useState(false);
   const [updateProgress, setUpdateProgress] = useState({ status: 'idle', percent: 0, message: '' });
   const [autoUpdateChecked, setAutoUpdateChecked] = useState(false);
-  const [siteForm] = Form.useForm();
   const [banForm] = Form.useForm();
   const [whitelistForm] = Form.useForm();
   const [licenseForm] = Form.useForm();
@@ -226,7 +225,6 @@ function AdminConsole() {
   }, [updateModal]);
 
   function openAddModal(type) {
-    if (type === 'site') siteForm.resetFields();
     if (type === 'ban') banForm.resetFields();
     if (type === 'whitelist') whitelistForm.resetFields();
     setAddModal(type);
@@ -267,11 +265,30 @@ function AdminConsole() {
   }
 
   async function pickNginxConfigFile() {
+    const serviceDir = nginxInfo.config_dir?.trim();
+    if (!serviceDir) {
+      message.warning('请先设置 Web 服务目录');
+      setNginxModal(true);
+      return;
+    }
     setNginxScanLoading(true);
     try {
-      const result = await api('/api/nginx/pick-config', { method: 'POST' });
+      const result = await api('/api/nginx/pick-config', {
+        method: 'POST',
+        body: JSON.stringify({ config_dir: serviceDir }),
+      });
       if (result.path) {
-        nginxForm.setFieldValue('config_dir', result.path);
+        const scan = await api('/api/nginx/scan', {
+          method: 'POST',
+          body: JSON.stringify({
+            config_dir: serviceDir,
+            config_file: result.path,
+            binary: nginxInfo.binary || undefined,
+          }),
+        });
+        const count = scan.sites?.length || 0;
+        message.success(`配置导入完成：发现 ${count} 个站点，读取 ${scan.scanned_files || 0} 个配置文件`);
+        await refresh();
       } else {
         message.info('已取消选择配置文件');
       }
@@ -282,39 +299,17 @@ function AdminConsole() {
     }
   }
 
-  async function scanNginx(values) {
+  async function configureWebService(values) {
     setNginxScanLoading(true);
     try {
-      const result = await api('/api/nginx/scan', { method: 'POST', body: JSON.stringify(values) });
+      await api('/api/nginx/configure', { method: 'POST', body: JSON.stringify(values) });
       setNginxModal(false);
-      const count = result.sites?.length || 0;
-      if (count) {
-        message.success(`Nginx 扫描完成：发现 ${count} 个站点，读取 ${result.scanned_files || 0} 个配置文件`);
-      } else {
-        message.warning(`未发现可管理站点，已读取 ${result.scanned_files || 0} 个配置文件`);
-      }
+      message.success('Web 服务目录已保存，请点击“导入配置”选择 server 配置');
       await refresh();
     } catch (cause) {
       message.error(cause.message);
     } finally {
       setNginxScanLoading(false);
-    }
-  }
-
-  async function saveSite(values) {
-    try {
-      const existing = sites.find((site) => site.host === values.host.trim().toLowerCase());
-      await api('/api/sites', {
-        method: 'POST',
-        body: JSON.stringify({ ...values, enabled: existing ? existing.enabled : true }),
-      });
-      siteForm.resetFields();
-      message.success('站点已保存');
-      await refresh();
-      return true;
-    } catch (cause) {
-      message.error(cause.message);
-      return false;
     }
   }
 
@@ -499,10 +494,10 @@ function AdminConsole() {
                 children: (
                   <div className="management-panel">
                     <div className="management-panel-head">
-                      <SectionTitle icon={<GlobalOutlined />} title="站点路由" description={`${sites.length} 个站点正在管理 · ${nginxInfo.configured ? 'Nginx 已接入' : '尚未接入 Nginx'}`} />
+                      <SectionTitle icon={<GlobalOutlined />} title="站点路由" description={`${sites.length} 个站点正在管理 · ${nginxInfo.configured ? 'Web 服务目录已设置' : '尚未设置 Web 服务目录'}`} />
                       <Space>
-                        <Button icon={<FolderOpenOutlined />} onClick={() => { nginxForm.setFieldValue('config_dir', nginxInfo.config_dir || ''); setNginxModal(true); }}>导入 Nginx</Button>
-                        <Button type="primary" icon={<PlusOutlined />} onClick={() => openAddModal('site')}>手动添加</Button>
+                        <Button icon={<FolderOpenOutlined />} onClick={() => { nginxForm.setFieldValue('config_dir', nginxInfo.config_dir || ''); setNginxModal(true); }}>设置 Web 服务目录</Button>
+                        <Button type="primary" icon={<FileSearchOutlined />} onClick={pickNginxConfigFile}>导入配置</Button>
                       </Space>
                     </div>
                     <Table rowKey="host" loading={loading} columns={siteColumns} dataSource={sites} pagination={{ pageSize: 8 }} />
@@ -540,19 +535,11 @@ function AdminConsole() {
         <Modal
           open={Boolean(addModal)}
           centered
-          title={addModal === 'site' ? '添加站点' : addModal === 'ban' ? '添加临时封禁' : '添加白名单'}
+          title={addModal === 'ban' ? '添加临时封禁' : '添加白名单'}
           footer={null}
           destroyOnClose
           onCancel={() => setAddModal(null)}
         >
-          {addModal === 'site' && (
-            <Form form={siteForm} layout="vertical" onFinish={async (values) => { if (await saveSite(values)) setAddModal(null); }}>
-              <Form.Item name="host" label="Host" rules={[{ required: true, message: '请输入 Host' }]}><Input placeholder="project.local" /></Form.Item>
-              <Form.Item name="target" label="Upstream" rules={[{ required: true, message: '请输入 upstream' }]}><Input placeholder="http://127.0.0.1:9001" /></Form.Item>
-              <Form.Item name="policy" label="策略" initialValue="normal"><Input placeholder="策略" /></Form.Item>
-              <Button type="primary" htmlType="submit" block icon={<GlobalOutlined />}>保存站点</Button>
-            </Form>
-          )}
           {addModal === 'ban' && (
             <Form form={banForm} layout="vertical" onFinish={async (values) => { if (await saveBan(values)) setAddModal(null); }}>
               <Form.Item name="ip" label="IP 地址" rules={[{ required: true, message: '请输入 IP 地址' }]}><Input placeholder="192.168.1.20" /></Form.Item>
@@ -572,22 +559,21 @@ function AdminConsole() {
         <Modal
           open={nginxModal}
           centered
-          title="导入 Nginx 站点"
-          okText="扫描站点"
+          title="设置 Web 服务目录"
+          okText="保存目录"
           cancelText="取消"
           confirmLoading={nginxScanLoading}
           onCancel={() => setNginxModal(false)}
           onOk={() => nginxForm.submit()}
         >
-          <Form form={nginxForm} layout="vertical" onFinish={scanNginx} onFinishFailed={() => message.warning('请选择或输入有效的 Nginx 运行目录或配置文件')}>
-            <Form.Item name="config_dir" label="Nginx 运行目录或配置文件" rules={[{ required: true, message: '请选择或输入 Nginx 运行目录或配置文件' }]}>
-              <Input placeholder="例如 C:\\nginx、/etc/nginx 或 nginx.conf" />
+          <Form form={nginxForm} layout="vertical" onFinish={configureWebService} onFinishFailed={() => message.warning('请选择或输入有效的 Web 服务目录')}>
+            <Form.Item name="config_dir" label="Web 服务目录" rules={[{ required: true, message: '请选择或输入 Web 服务目录' }]}>
+              <Input placeholder="例如 C:\\web-sites 或 /etc/nginx/conf.d" />
             </Form.Item>
             <Space>
-              <Button icon={<FolderOpenOutlined />} loading={nginxScanLoading} onClick={pickNginxDirectory}>选择运行目录</Button>
-              <Button icon={<FileSearchOutlined />} loading={nginxScanLoading} onClick={pickNginxConfigFile}>选择配置文件</Button>
+              <Button icon={<FolderOpenOutlined />} loading={nginxScanLoading} onClick={pickNginxDirectory}>选择目录</Button>
             </Space>
-            <Alert type="info" showIcon message="选择安装目录会自动查找 nginx.conf 和 include 配置；也可以直接选择实际配置文件，程序只导入该文件及其 include 的站点。" />
+            <Alert type="info" showIcon message="保存目录后，点击站点路由右上角“导入配置”，只能选择此目录内的 .conf 文件。每个文件可以是独立的 server 配置块。" />
           </Form>
         </Modal>
         <Modal

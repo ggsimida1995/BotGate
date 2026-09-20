@@ -124,13 +124,21 @@ fn start_backend(paths: &RuntimePaths, port: u16) -> Result<Child, Box<dyn std::
         return Err(format!("未找到管理界面资源：{}", paths.frontend.display()).into());
     }
     let desktop_executable = std::env::current_exe()?;
-    Ok(Command::new(&paths.backend)
+    let mut command = Command::new(&paths.backend);
+    command
         .arg("--headless")
         .arg(&paths.config)
         .env("BOT_GATE_ADMIN_LISTEN", format!("127.0.0.1:{port}"))
         .env("BOT_GATE_FRONTEND_DIST", &paths.frontend)
         .env("BOT_GATE_DESKTOP_EXECUTABLE", desktop_executable)
-        .env("BOT_GATE_DESKTOP_PID", std::process::id().to_string())
+        .env("BOT_GATE_DESKTOP_PID", std::process::id().to_string());
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        command.creation_flags(0x08000000);
+    }
+    Ok(command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
