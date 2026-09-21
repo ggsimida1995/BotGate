@@ -1029,7 +1029,8 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
                 .collect::<Vec<_>>();
             if let Some((offset, target)) = proxies.first().cloned() {
                 for host in hosts.iter().cloned() {
-                    let managed = block.iter().any(|line| line.contains("bot-gate: managed"));
+                    let managed = front_target.is_some()
+                        || block.iter().any(|line| line.contains("bot-gate: managed"));
                     let standard = proxies.len() == 1
                         && !target.contains('$')
                         && Url::parse(&target).is_ok_and(|url| {

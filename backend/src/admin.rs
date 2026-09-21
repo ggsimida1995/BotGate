@@ -1026,7 +1026,7 @@ pub(crate) async fn admin_nginx_toggle(
         Err(response) => return *response,
     };
     let gateway = state.gateway.status().await;
-    if !gateway.running {
+    if input.protected && !gateway.running {
         return json_response(
             StatusCode::CONFLICT,
             serde_json::json!({"message":"请先启动 Bot Gate 网关，再接管 Nginx 站点"}),
