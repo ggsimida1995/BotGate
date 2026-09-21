@@ -1004,13 +1004,9 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
             }
             let end = index.min(lines.len());
             let block = &lines[start..end];
-            if block
+            let is_front_gateway = block
                 .iter()
-                .any(|line| line.contains("bot-gate: front-gateway"))
-            {
-                index = end;
-                continue;
-            }
+                .any(|line| line.contains("bot-gate: front-gateway"));
             let hosts = server_names(block);
             let listen_line = block.iter().enumerate().find_map(|(offset, line)| {
                 directive_value(without_comment(line), "listen").map(|_| start + offset)
@@ -1027,6 +1023,10 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
                     parse_proxy_pass(without_comment(line)).map(|target| (offset, target))
                 })
                 .collect::<Vec<_>>();
+            if is_front_gateway {
+                index = end;
+                continue;
+            }
             if let Some((offset, target)) = proxies.first().cloned() {
                 for host in hosts.iter().cloned() {
                     let managed = front_target.is_some()

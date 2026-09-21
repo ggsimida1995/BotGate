@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "bot-gate-desktop"
-version = "0.2.32"
+version = "0.2.33"
 dependencies = [
  "tauri",
  "tauri-build",
