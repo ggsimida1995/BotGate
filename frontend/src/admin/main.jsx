@@ -362,12 +362,13 @@ function AdminConsole() {
   }
 
   async function toggleNginxSite(row) {
+    const protectedState = Boolean(row.enabled);
     try {
       await api('/api/nginx/toggle', {
         method: 'POST',
-        body: JSON.stringify({ id: row.id, protected: !row.protected }),
+        body: JSON.stringify({ id: row.id, protected: !protectedState }),
       });
-      message.success(row.protected ? '已取消保护，Nginx 恢复直连项目' : '已启用保护，Nginx 请求将经过 Bot Gate');
+      message.success(protectedState ? '已取消保护，Nginx 恢复直连项目' : '已启用保护，Nginx 请求将经过 Bot Gate');
       await refresh();
     } catch (cause) { message.error(cause.message); }
   }
@@ -408,8 +409,8 @@ function AdminConsole() {
     { title: '操作', key: 'action', render: (_, row) => <Space size="small">
       {row.source === 'nginx' ? (
         <>
-          <Tooltip title={!row.supported ? '不是标准 proxy_pass，无法自动接管' : row.protected ? '取消保护并恢复 Nginx 直连' : '启用保护并接入 Bot Gate'}>
-            <Button type="link" disabled={!row.supported} aria-label={row.protected ? '取消保护' : '启用保护'} icon={row.protected ? <PauseCircleOutlined /> : <SafetyCertificateOutlined />} onClick={() => toggleNginxSite(row)} />
+          <Tooltip title={!row.supported ? '不是标准 proxy_pass，无法自动接管' : row.enabled ? '取消保护并恢复 Nginx 直连' : '启用保护并接入 Bot Gate'}>
+            <Button type="link" disabled={!row.supported} aria-label={row.enabled ? '取消保护' : '启用保护'} icon={row.enabled ? <PauseCircleOutlined /> : <SafetyCertificateOutlined />} onClick={() => toggleNginxSite(row)} />
           </Tooltip>
           <Popconfirm title="从 Bot Gate 移除此站点？" description="不会删除 Nginx 配置；受保护站点会先恢复为原 upstream。" okText="移除" cancelText="取消" onConfirm={() => deleteNginxSite(row)}>
             <Tooltip title="移除站点"><Button danger type="link" aria-label="移除 Nginx 站点" icon={<DeleteOutlined />} /></Tooltip>

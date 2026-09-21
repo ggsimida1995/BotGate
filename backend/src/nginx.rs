@@ -408,7 +408,7 @@ impl NginxManager {
             .as_deref()
             .context("请先设置 Web 服务目录")?;
         let binary = self.binary_path();
-        let context = nginx_config_context(config_dir);
+        let context = self.reload_context(config_dir);
         let test = if let Some((prefix_dir, config)) = context.as_ref() {
             let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
             nginx_command(&binary)
@@ -452,6 +452,19 @@ impl NginxManager {
             );
         }
         Ok(())
+    }
+
+    fn reload_context(&self, config_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+        if let Some(config) = self.selected_config.as_deref() {
+            let parent = config.parent().unwrap_or(config);
+            let prefix = if parent.file_name().and_then(|name| name.to_str()) == Some("conf") {
+                parent.parent().unwrap_or(parent).to_path_buf()
+            } else {
+                parent.to_path_buf()
+            };
+            return Some((prefix, config.to_path_buf()));
+        }
+        nginx_config_context(config_dir)
     }
 
     fn binary_path(&self) -> PathBuf {
@@ -1601,6 +1614,30 @@ server {
         assert_eq!(discovered.len(), 1);
         assert_eq!(discovered[0].host, "cool.test");
         assert_eq!(manager.last_scan_file_count(), 2);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn reloads_the_selected_config_file_instead_of_the_default_config() {
+        let root = std::env::temp_dir().join(format!(
+            "bot-gate-nginx-reload-context-test-{}-{}",
+            std::process::id(),
+            unix_test_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let config = root.join("nginx-test.conf");
+        fs::write(&config, "events {}\nhttp {}\n").unwrap();
+
+        let mut manager = NginxManager::default();
+        manager
+            .configure(config.display().to_string(), None)
+            .unwrap();
+
+        assert_eq!(
+            manager.reload_context(&root),
+            Some((root.clone(), config.clone()))
+        );
 
         let _ = fs::remove_dir_all(root);
     }
