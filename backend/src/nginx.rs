@@ -2,6 +2,7 @@ use std::{
     collections::{hash_map::DefaultHasher, HashMap, HashSet},
     fs,
     hash::{Hash, Hasher},
+    net::TcpListener,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -32,6 +33,8 @@ struct SiteRef {
     block_start: usize,
     block_end: usize,
     proxy_line: usize,
+    listen_line: Option<usize>,
+    front_mode: bool,
     protected: bool,
     supported: bool,
 }
@@ -207,7 +210,9 @@ impl NginxManager {
                     .iter()
                     .find(|candidate| candidate.host == parsed.host)
                     .map(|candidate| candidate.target.clone());
-                let original_target = if parsed.protected {
+                let original_target = if parsed.front_target.is_some() {
+                    String::new()
+                } else if parsed.protected {
                     backup_target.unwrap_or_else(|| parsed.target.clone())
                 } else {
                     parsed.target.clone()
@@ -217,16 +222,20 @@ impl NginxManager {
                     SiteRef {
                         id: parsed.id,
                         host: parsed.host,
-                        target: if parsed.protected {
-                            original_target.clone()
-                        } else {
-                            parsed.target
-                        },
+                        target: parsed.front_target.clone().unwrap_or_else(|| {
+                            if parsed.protected {
+                                original_target.clone()
+                            } else {
+                                parsed.target
+                            }
+                        }),
                         original_target,
                         config_file: file.clone(),
                         block_start: parsed.block_start,
                         block_end: parsed.block_end,
                         proxy_line: parsed.proxy_line,
+                        listen_line: parsed.listen_line,
+                        front_mode: parsed.front_mode,
                         protected: parsed.protected,
                         supported: parsed.supported,
                     },
@@ -267,6 +276,59 @@ impl NginxManager {
         }
         let source = fs::read_to_string(&site.config_file)
             .with_context(|| format!("无法读取 Nginx 配置: {}", site.config_file.display()))?;
+        if site.front_mode {
+            let candidate = if protected {
+                let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+                let listen_line = site
+                    .listen_line
+                    .context("Nginx server 块缺少 listen 配置")?;
+                let original_listen = lines
+                    .get(listen_line)
+                    .and_then(|line| listen_spec(line))
+                    .context("Nginx listen 配置无效")?;
+                let internal_port = allocate_front_proxy_port()?;
+                let internal_target = format!("http://127.0.0.1:{internal_port}");
+                let line = lines
+                    .get_mut(listen_line)
+                    .context("Nginx 配置行已变化，请重新扫描")?;
+                replace_listen_target(line, &format!("127.0.0.1:{internal_port}"))?;
+                if !line.contains("bot-gate: front-proxy") {
+                    line.push_str(&format!(
+                        " # bot-gate: managed front-proxy upstream={internal_target}"
+                    ));
+                }
+                if !backup_path(&site.config_file).exists() {
+                    fs::copy(&site.config_file, backup_path(&site.config_file)).with_context(
+                        || format!("无法创建 Nginx 配置备份: {}", site.config_file.display()),
+                    )?;
+                }
+                let host = &site.host;
+                let front = format!(
+                    "\n\n# bot-gate: front-gateway\nserver {{\n    listen {original_listen};\n    server_name {host};\n    location / {{\n        proxy_pass http://{gateway_address};\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_http_version 1.1;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n    }}\n}}\n"
+                );
+                let mut candidate = join_lines(&lines, source.ends_with('\n'));
+                candidate.push_str(&front);
+                candidate
+            } else {
+                fs::read_to_string(backup_path(&site.config_file)).with_context(|| {
+                    format!(
+                        "无法读取 Nginx 配置备份: {}",
+                        backup_path(&site.config_file).display()
+                    )
+                })?
+            };
+            fs::write(&site.config_file, candidate.as_bytes())
+                .with_context(|| format!("无法写入 Nginx 配置: {}", site.config_file.display()))?;
+            if let Err(error) = self.test_and_reload() {
+                let _ = fs::write(&site.config_file, source);
+                return Err(error);
+            }
+            return self
+                .scan()?
+                .into_iter()
+                .find(|value| value.host == site.host)
+                .context("Nginx 配置刷新后未找到站点");
+        }
         let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
         let had_trailing_newline = source.ends_with('\n');
         let replacement = if protected {
@@ -756,6 +818,9 @@ struct ParsedSite {
     block_start: usize,
     block_end: usize,
     proxy_line: usize,
+    listen_line: Option<usize>,
+    front_target: Option<String>,
+    front_mode: bool,
     protected: bool,
     supported: bool,
 }
@@ -939,7 +1004,22 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
             }
             let end = index.min(lines.len());
             let block = &lines[start..end];
+            if block
+                .iter()
+                .any(|line| line.contains("bot-gate: front-gateway"))
+            {
+                index = end;
+                continue;
+            }
             let hosts = server_names(block);
+            let listen_line = block.iter().enumerate().find_map(|(offset, line)| {
+                directive_value(without_comment(line), "listen").map(|_| start + offset)
+            });
+            let front_target = block.iter().find_map(|line| {
+                line.split_once("bot-gate: managed front-proxy upstream=")
+                    .and_then(|(_, value)| value.split_whitespace().next())
+                    .map(str::to_string)
+            });
             let proxies = block
                 .iter()
                 .enumerate()
@@ -950,12 +1030,13 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
             if let Some((offset, target)) = proxies.first().cloned() {
                 for host in hosts.iter().cloned() {
                     let managed = block.iter().any(|line| line.contains("bot-gate: managed"));
-                    let supported = host != "_"
-                        && proxies.len() == 1
+                    let standard = proxies.len() == 1
                         && !target.contains('$')
                         && Url::parse(&target).is_ok_and(|url| {
                             url.scheme() == "http" && (url.path().is_empty() || url.path() == "/")
                         });
+                    let front_mode = !standard || front_target.is_some();
+                    let supported = host != "_" && (standard || listen_line.is_some());
                     sites.push(ParsedSite {
                         id: site_id(path, &host, start),
                         host,
@@ -963,6 +1044,9 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
                         block_start: start,
                         block_end: end,
                         proxy_line: start + offset,
+                        listen_line,
+                        front_target: front_target.clone(),
+                        front_mode,
                         protected: managed,
                         supported,
                     });
@@ -976,6 +1060,7 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
                 });
                 if let Some(root) = root {
                     for host in hosts.iter().cloned() {
+                        let host_supported = host != "_" && listen_line.is_some();
                         sites.push(ParsedSite {
                             id: site_id(path, &host, start),
                             host,
@@ -983,8 +1068,11 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
                             block_start: start,
                             block_end: end,
                             proxy_line: start,
+                            listen_line,
+                            front_target: front_target.clone(),
+                            front_mode: true,
                             protected: false,
-                            supported: false,
+                            supported: host_supported,
                         });
                     }
                 }
@@ -1024,6 +1112,33 @@ fn parse_proxy_pass(line: &str) -> Option<String> {
         .split_whitespace()
         .next()?;
     Some(target.to_string())
+}
+
+fn listen_spec(line: &str) -> Option<String> {
+    directive_value(without_comment(line), "listen")?
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+}
+
+fn replace_listen_target(line: &mut String, replacement: &str) -> Result<()> {
+    let keyword = line.find("listen").context("Nginx listen 行无效")?;
+    let value_start = keyword + "listen".len();
+    let whitespace = line[value_start..]
+        .find(|ch: char| !ch.is_whitespace())
+        .map(|offset| value_start + offset)
+        .context("Nginx listen 缺少端口")?;
+    let value_end = line[whitespace..]
+        .find(char::is_whitespace)
+        .map(|offset| whitespace + offset)
+        .unwrap_or(line.len());
+    line.replace_range(whitespace..value_end, replacement);
+    Ok(())
+}
+
+fn allocate_front_proxy_port() -> Result<u16> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).context("无法分配 Nginx 内部监听端口")?;
+    Ok(listener.local_addr()?.port())
 }
 
 fn directive_value<'a>(line: &'a str, directive: &str) -> Option<&'a str> {
@@ -1196,6 +1311,17 @@ mod tests {
     }
 
     #[test]
+    fn supports_a_multi_location_server_with_front_gateway_mode() {
+        let source = "server {\n    listen 18081;\n    server_name 172.22.31.39;\n    root d:/ps_dev/dist;\n    location /api/ { proxy_pass http://127.0.0.1:8001/; }\n    location /socket { proxy_pass http://127.0.0.1:8001/socket; }\n}\n";
+        let sites = parse_file(Path::new("nginx-test.conf"), source);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].host, "172.22.31.39");
+        assert!(sites[0].supported);
+        assert!(sites[0].front_mode);
+        assert_eq!(sites[0].listen_line, Some(1));
+    }
+
+    #[test]
     fn ignores_static_and_variable_upstreams() {
         let source = "server {\n    server_name static.test;\n    root html;\n}\nserver {\n    server_name variable.test;\n    proxy_pass http://$backend;\n}\n";
         let sites = parse_file(Path::new("nginx.conf"), source);
@@ -1254,6 +1380,8 @@ mod tests {
                 block_start: 0,
                 block_end: 1,
                 proxy_line: 0,
+                listen_line: None,
+                front_mode: false,
                 protected: false,
                 supported: true,
             },
@@ -1269,6 +1397,8 @@ mod tests {
                 block_start: 2,
                 block_end: 3,
                 proxy_line: 2,
+                listen_line: None,
+                front_mode: false,
                 protected: false,
                 supported: true,
             },
