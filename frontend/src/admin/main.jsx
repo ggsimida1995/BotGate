@@ -29,8 +29,6 @@ import {
   CloudOutlined,
   CloudDownloadOutlined,
   DeleteOutlined,
-  FileSearchOutlined,
-  FolderOpenOutlined,
   GlobalOutlined,
   KeyOutlined,
   LockOutlined,
@@ -75,15 +73,11 @@ function AdminConsole() {
   const [sites, setSites] = useState([]);
   const [bans, setBans] = useState([]);
   const [whitelist, setWhitelist] = useState([]);
-  const [caddyEnabled, setCaddyEnabled] = useState(false);
-  const [nginxInfo, setNginxInfo] = useState({ configured: false });
   const [lastUpdated, setLastUpdated] = useState(null);
   const [systemInfo, setSystemInfo] = useState({ version: '0.1.0', update_enabled: false, gateway: { running: false } });
   const [gatewayStatus, setGatewayStatus] = useState({ running: false });
   const [logModal, setLogModal] = useState(null);
   const [addModal, setAddModal] = useState(null);
-  const [nginxModal, setNginxModal] = useState(false);
-  const [nginxScanLoading, setNginxScanLoading] = useState(false);
   const [licenseModal, setLicenseModal] = useState(false);
   const [updateModal, setUpdateModal] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -93,8 +87,8 @@ function AdminConsole() {
   const [autoUpdateChecked, setAutoUpdateChecked] = useState(false);
   const [banForm] = Form.useForm();
   const [whitelistForm] = Form.useForm();
+  const [siteForm] = Form.useForm();
   const [licenseForm] = Form.useForm();
-  const [nginxForm] = Form.useForm();
   const licenseStatus = systemInfo.license?.status || 'disabled';
   const licenseLabel = licenseStatus === 'active' ? '有效' : licenseStatus === 'disabled' ? '未启用' : '未激活';
 
@@ -111,8 +105,6 @@ function AdminConsole() {
       ]);
       setDashboard(stats);
       setSites(siteData.sites || []);
-      setCaddyEnabled(Boolean(siteData.caddy_enabled));
-      setNginxInfo(siteData.nginx || { configured: false });
       setBans(banData.bans || []);
       setWhitelist(whitelistData.whitelist || []);
       setSystemInfo(systemData);
@@ -227,6 +219,7 @@ function AdminConsole() {
   function openAddModal(type) {
     if (type === 'ban') banForm.resetFields();
     if (type === 'whitelist') whitelistForm.resetFields();
+    if (type === 'site') siteForm.resetFields();
     setAddModal(type);
   }
 
@@ -245,71 +238,6 @@ function AdminConsole() {
       await refresh();
     } catch (cause) {
       message.error(cause.message);
-    }
-  }
-
-  async function pickNginxDirectory() {
-    setNginxScanLoading(true);
-    try {
-      const result = await api('/api/nginx/pick', { method: 'POST' });
-      if (result.path) {
-        nginxForm.setFieldValue('config_dir', result.path);
-      } else {
-        message.info('已取消选择目录');
-      }
-    } catch (cause) {
-      message.error(cause.message);
-    } finally {
-      setNginxScanLoading(false);
-    }
-  }
-
-  async function pickNginxConfigFile() {
-    const serviceDir = nginxInfo.config_dir?.trim();
-    if (!serviceDir) {
-      message.warning('请先设置 Web 服务目录');
-      setNginxModal(true);
-      return;
-    }
-    setNginxScanLoading(true);
-    try {
-      const result = await api('/api/nginx/pick-config', {
-        method: 'POST',
-        body: JSON.stringify({ config_dir: serviceDir }),
-      });
-      if (result.path) {
-        const scan = await api('/api/nginx/scan', {
-          method: 'POST',
-          body: JSON.stringify({
-            config_dir: serviceDir,
-            config_file: result.path,
-            binary: nginxInfo.binary || undefined,
-          }),
-        });
-        const count = scan.sites?.length || 0;
-        message.success(`配置导入完成：发现 ${count} 个站点，读取 ${scan.scanned_files || 0} 个配置文件`);
-        await refresh();
-      } else {
-        message.info('已取消选择配置文件');
-      }
-    } catch (cause) {
-      message.error(cause.message);
-    } finally {
-      setNginxScanLoading(false);
-    }
-  }
-
-  async function configureWebService(values) {
-    setNginxScanLoading(true);
-    try {
-      await api('/api/nginx/configure', { method: 'POST', body: JSON.stringify(values) });
-      setNginxModal(false);
-      message.success('Web 服务目录已保存，请点击“导入配置”选择 server 配置');
-      await refresh();
-    } catch (cause) {
-      message.error(cause.message);
-    } finally {
-      setNginxScanLoading(false);
     }
   }
 
@@ -342,6 +270,21 @@ function AdminConsole() {
     }
   }
 
+  async function saveSite(values) {
+    try {
+      await api('/api/sites', {
+        method: 'POST',
+        body: JSON.stringify({ ...values, policy: 'normal', enabled: true }),
+      });
+      message.success('前置代理站点已保存');
+      await refresh();
+      return true;
+    } catch (cause) {
+      message.error(cause.message);
+      return false;
+    }
+  }
+
   async function deleteSite(host) {
     try {
       await api('/api/sites/delete', { method: 'POST', body: JSON.stringify({ host }) });
@@ -357,29 +300,6 @@ function AdminConsole() {
         body: JSON.stringify({ host: row.host, enabled: !row.enabled }),
       });
       message.success(row.enabled ? '已暂停保护，域名将直连项目' : '已恢复保护，域名重新经过 Bot Gate');
-      await refresh();
-    } catch (cause) { message.error(cause.message); }
-  }
-
-  async function toggleNginxSite(row) {
-    const protectedState = Boolean(row.enabled);
-    try {
-      await api('/api/nginx/toggle', {
-        method: 'POST',
-        body: JSON.stringify({ id: row.id, protected: !protectedState }),
-      });
-      message.success(protectedState ? '已取消保护，Nginx 恢复直连项目' : '已启用保护，Nginx 请求将经过 Bot Gate');
-      await refresh();
-    } catch (cause) { message.error(cause.message); }
-  }
-
-  async function deleteNginxSite(row) {
-    try {
-      await api('/api/nginx/delete', {
-        method: 'POST',
-        body: JSON.stringify({ id: row.id }),
-      });
-      message.success('Nginx 站点已从 Bot Gate 列表移除，原配置已恢复直连');
       await refresh();
     } catch (cause) { message.error(cause.message); }
   }
@@ -401,27 +321,15 @@ function AdminConsole() {
   }
 
   const siteColumns = [
-    { title: 'Host', dataIndex: 'host', key: 'host' },
-    { title: 'Upstream', dataIndex: 'target', key: 'target' },
-    { title: '来源', dataIndex: 'source', key: 'source', render: (value) => value === 'nginx' ? <Tag color="blue">Nginx</Tag> : <Tag>手动</Tag> },
+    { title: '公网 Host', dataIndex: 'host', key: 'host' },
+    { title: 'Nginx 源站', dataIndex: 'target', key: 'target' },
     { title: '策略', dataIndex: 'policy', key: 'policy', render: (value) => <Tag>{value}</Tag> },
-    { title: '保护状态', dataIndex: 'enabled', key: 'enabled', render: (value, row) => <Tag color={value ? 'success' : row.source === 'nginx' && !row.supported ? 'warning' : 'default'}>{value ? '保护中' : row.source === 'nginx' && !row.supported ? '无法自动接管' : row.source === 'nginx' ? '未保护，直连' : '已暂停，直连'}</Tag> },
+    { title: '保护状态', dataIndex: 'enabled', key: 'enabled', render: (value) => <Tag color={value ? 'success' : 'default'}>{value ? '保护中' : '已暂停'}</Tag> },
     { title: '操作', key: 'action', render: (_, row) => <Space size="small">
-      {row.source === 'nginx' ? (
-        <>
-          <Tooltip title={!row.supported ? '不是标准 proxy_pass，无法自动接管' : row.enabled ? '取消保护并恢复 Nginx 直连' : '启用保护并接入 Bot Gate'}>
-            <Button type="link" disabled={!row.supported} aria-label={row.enabled ? '取消保护' : '启用保护'} icon={row.enabled ? <PauseCircleOutlined /> : <SafetyCertificateOutlined />} onClick={() => toggleNginxSite(row)} />
-          </Tooltip>
-          <Popconfirm title="从 Bot Gate 移除此站点？" description="不会删除 Nginx 配置；受保护站点会先恢复为原 upstream。" okText="移除" cancelText="取消" onConfirm={() => deleteNginxSite(row)}>
-            <Tooltip title="移除站点"><Button danger type="link" aria-label="移除 Nginx 站点" icon={<DeleteOutlined />} /></Tooltip>
-          </Popconfirm>
-        </>
-      ) : (
-        <Tooltip title={caddyEnabled ? (row.enabled ? '暂停保护' : '恢复保护') : '外部代理未启用自动切换'}>
-          <Button type="link" disabled={!caddyEnabled} aria-label={row.enabled ? '暂停保护' : '恢复保护'} icon={row.enabled ? <PauseCircleOutlined /> : <UnlockOutlined />} onClick={() => toggleSite(row)} />
-        </Tooltip>
-      )}
-      {row.source !== 'nginx' && <Tooltip title="删除站点"><Button danger type="link" aria-label="删除站点" icon={<DeleteOutlined />} onClick={() => deleteSite(row.host)} /></Tooltip>}
+      <Tooltip title={row.enabled ? '暂停保护' : '恢复保护'}>
+        <Button type="link" aria-label={row.enabled ? '暂停保护' : '恢复保护'} icon={row.enabled ? <PauseCircleOutlined /> : <UnlockOutlined />} onClick={() => toggleSite(row)} />
+      </Tooltip>
+      <Tooltip title="删除站点"><Button danger type="link" aria-label="删除站点" icon={<DeleteOutlined />} onClick={() => deleteSite(row.host)} /></Tooltip>
     </Space> },
   ];
   const banColumns = [
@@ -495,12 +403,16 @@ function AdminConsole() {
                 children: (
                   <div className="management-panel">
                     <div className="management-panel-head">
-                      <SectionTitle icon={<GlobalOutlined />} title="站点路由" description={`${sites.length} 个站点正在管理 · ${nginxInfo.configured ? 'Web 服务目录已设置' : '尚未设置 Web 服务目录'}`} />
-                      <Space>
-                        <Button icon={<FolderOpenOutlined />} onClick={() => { nginxForm.setFieldValue('config_dir', nginxInfo.config_dir || ''); setNginxModal(true); }}>设置 Web 服务目录</Button>
-                        <Button type="primary" icon={<FileSearchOutlined />} onClick={pickNginxConfigFile}>导入配置</Button>
-                      </Space>
+                      <SectionTitle icon={<GlobalOutlined />} title="前置代理站点" description={`${sites.length} 个站点由 Bot Gate 前置保护；Nginx 仅作为内部源站`} />
+                      <Button type="primary" icon={<PlusOutlined />} onClick={() => openAddModal('site')}>添加前置站点</Button>
                     </div>
+                    <Alert
+                      type="info"
+                      showIcon
+                      message="部署方式：公网访问 Bot Gate；Nginx 改为仅监听内部端口。Bot Gate 不再修改或重载 Nginx 配置。"
+                      description="示例：Bot Gate 对外监听 0.0.0.0:18081，Nginx 源站监听 127.0.0.1:18082；将本页的公网 Host 和 Nginx 源站地址保存为一条前置代理站点。"
+                      style={{ marginBottom: 16 }}
+                    />
                     <Table rowKey="host" loading={loading} columns={siteColumns} dataSource={sites} pagination={{ pageSize: 8 }} />
                   </div>
                 ),
@@ -536,11 +448,29 @@ function AdminConsole() {
         <Modal
           open={Boolean(addModal)}
           centered
-          title={addModal === 'ban' ? '添加临时封禁' : '添加白名单'}
+          title={addModal === 'site' ? '添加前置代理站点' : addModal === 'ban' ? '添加临时封禁' : '添加白名单'}
           footer={null}
           destroyOnClose
           onCancel={() => setAddModal(null)}
         >
+          {addModal === 'site' && (
+            <Form form={siteForm} layout="vertical" onFinish={async (values) => { if (await saveSite(values)) setAddModal(null); }}>
+              <Alert
+                type="warning"
+                showIcon
+                message="请先将 Nginx 改为内部监听"
+                description="Nginx 必须只暴露给本机或内网，例如 127.0.0.1:18082；否则用户仍可绕过 Bot Gate 直接访问 Nginx。"
+                style={{ marginBottom: 16 }}
+              />
+              <Form.Item name="host" label="公网 Host" rules={[{ required: true, message: '请输入用户访问的域名或 IP' }]}>
+                <Input placeholder="172.22.31.39 或 example.com" />
+              </Form.Item>
+              <Form.Item name="target" label="Nginx 内部源站" rules={[{ required: true, type: 'url', message: '请输入完整 HTTP 地址' }]}>
+                <Input placeholder="http://127.0.0.1:18082" />
+              </Form.Item>
+              <Button type="primary" htmlType="submit" block icon={<SafetyCertificateOutlined />}>保存并启用保护</Button>
+            </Form>
+          )}
           {addModal === 'ban' && (
             <Form form={banForm} layout="vertical" onFinish={async (values) => { if (await saveBan(values)) setAddModal(null); }}>
               <Form.Item name="ip" label="IP 地址" rules={[{ required: true, message: '请输入 IP 地址' }]}><Input placeholder="192.168.1.20" /></Form.Item>
@@ -556,26 +486,6 @@ function AdminConsole() {
               <Button type="primary" htmlType="submit" block icon={<SafetyCertificateOutlined />}>保存白名单</Button>
             </Form>
           )}
-        </Modal>
-        <Modal
-          open={nginxModal}
-          centered
-          title="设置 Web 服务目录"
-          okText="保存目录"
-          cancelText="取消"
-          confirmLoading={nginxScanLoading}
-          onCancel={() => setNginxModal(false)}
-          onOk={() => nginxForm.submit()}
-        >
-          <Form form={nginxForm} layout="vertical" onFinish={configureWebService} onFinishFailed={() => message.warning('请选择或输入有效的 Web 服务目录')}>
-            <Form.Item name="config_dir" label="Web 服务目录" rules={[{ required: true, message: '请选择或输入 Web 服务目录' }]}>
-              <Input placeholder="例如 C:\\web-sites 或 /etc/nginx/conf.d" />
-            </Form.Item>
-            <Space>
-              <Button icon={<FolderOpenOutlined />} loading={nginxScanLoading} onClick={pickNginxDirectory}>选择目录</Button>
-            </Space>
-            <Alert type="info" showIcon message="保存目录后，点击站点路由右上角“导入配置”，只能选择此目录内的 .conf 文件。每个文件可以是独立的 server 配置块。" />
-          </Form>
         </Modal>
         <Modal
           open={licenseModal}
@@ -630,7 +540,7 @@ function AdminConsole() {
         <span className="footer-powered">Powered by <strong>Bot Gate</strong></span>
         <div className="footer-status">
           <Tag icon={<CheckCircleFilled />} color="success">本机运行</Tag>
-          <Tag>监听 · Loopback only</Tag>
+          <Tag>管理 · Loopback only</Tag>
           <Tag color={licenseStatus === 'active' ? 'success' : 'default'}>许可证 · {licenseLabel}</Tag>
           <Tag color={gatewayStatus.running ? 'success' : 'default'}>网关 · {gatewayStatus.running ? '运行中' : '已停止'}</Tag>
         </div>

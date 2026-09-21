@@ -1,7 +1,7 @@
 #![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     env,
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
@@ -16,7 +16,6 @@ mod config;
 mod gateway;
 mod http;
 mod license;
-mod nginx;
 mod proxy;
 mod security;
 mod storage;
@@ -31,10 +30,9 @@ use admin::{
     admin_delete_ban, admin_delete_site, admin_delete_whitelist, admin_gateway_start,
     admin_gateway_status, admin_gateway_stop, admin_interception_detail, admin_list_bans,
     admin_list_challenges, admin_list_interceptions, admin_list_requests, admin_list_sites,
-    admin_list_whitelist, admin_nginx_configure, admin_nginx_delete, admin_nginx_pick,
-    admin_nginx_pick_config, admin_nginx_scan, admin_nginx_toggle, admin_page, admin_reload_config,
-    admin_request_detail, admin_save_ban, admin_save_site, admin_save_whitelist, admin_system,
-    admin_toggle_site, admin_update_apply, admin_update_check, admin_update_progress,
+    admin_list_whitelist, admin_page, admin_reload_config, admin_request_detail, admin_save_ban,
+    admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site, admin_update_apply,
+    admin_update_check, admin_update_progress,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -58,7 +56,6 @@ use hyper_util::{
     rt::TokioExecutor,
 };
 use ipnet::IpNet;
-use nginx::NginxManager;
 use proxy::{header_bytes, https_redirect_response, proxy_request};
 use security::{BanEntry, SecurityState, WhitelistRule};
 use storage::{ManagedSite, ManagedWhitelist, RequestLog, SecurityEvent, Storage};
@@ -211,7 +208,6 @@ struct AdminState {
     config_path: PathBuf,
     tls_config: Option<RustlsConfig>,
     gateway: Arc<GatewayController>,
-    nginx: Arc<Mutex<NginxManager>>,
     update_progress: updater::UpdateProgressState,
 }
 
@@ -822,38 +818,12 @@ async fn run() -> Result<()> {
         body_limit,
     );
     let admin_state = if config.admin.enabled {
-        let nginx = NginxManager::new(
-            state.storage.get_setting("nginx.config_dir").ok().flatten(),
-            state.storage.get_setting("nginx.binary").ok().flatten(),
-        );
-        let ignored_hosts = state
-            .storage
-            .get_setting("nginx.ignored_hosts")
-            .ok()
-            .flatten()
-            .and_then(|value| serde_json::from_str::<Vec<String>>(&value).ok())
-            .unwrap_or_default()
-            .into_iter()
-            .collect::<HashSet<_>>();
-        let mut nginx = nginx;
-        nginx.set_ignored_hosts(ignored_hosts);
-        if let Some(config_file) = state
-            .storage
-            .get_setting("nginx.config_file")
-            .ok()
-            .flatten()
-        {
-            if !config_file.trim().is_empty() {
-                let _ = nginx.set_config_file(config_file);
-            }
-        }
         Some(Arc::new(AdminState {
             storage: state.storage.clone(),
             public_state: state.clone(),
             config_path: config_path.clone(),
             tls_config: tls_config.clone(),
             gateway: gateway.clone(),
-            nginx: Arc::new(Mutex::new(nginx)),
             update_progress: Arc::new(Mutex::new(updater::UpdateProgress::default())),
         }))
     } else {
@@ -900,12 +870,6 @@ async fn run() -> Result<()> {
             .route("/api/sites", get(admin_list_sites).post(admin_save_site))
             .route("/api/sites/toggle", post(admin_toggle_site))
             .route("/api/sites/delete", post(admin_delete_site))
-            .route("/api/nginx/scan", post(admin_nginx_scan))
-            .route("/api/nginx/configure", post(admin_nginx_configure))
-            .route("/api/nginx/pick", post(admin_nginx_pick))
-            .route("/api/nginx/pick-config", post(admin_nginx_pick_config))
-            .route("/api/nginx/toggle", post(admin_nginx_toggle))
-            .route("/api/nginx/delete", post(admin_nginx_delete))
             .route("/api/bans", get(admin_list_bans).post(admin_save_ban))
             .route("/api/bans/delete", post(admin_delete_ban))
             .route(

@@ -300,13 +300,11 @@ async fn download(
     let mut body = Vec::new();
     while let Some(chunk) = response.chunk().await.context("读取更新文件失败")? {
         body.extend_from_slice(&chunk);
-        let percent = if total == 0 {
-            start
-        } else {
-            start.saturating_add(
-                (((body.len() as u64).saturating_mul((end - start) as u64)) / total) as u8,
-            )
-        };
+        let downloaded = (body.len() as u64)
+            .saturating_mul((end - start) as u64)
+            .checked_div(total)
+            .unwrap_or(0) as u8;
+        let percent = start.saturating_add(downloaded);
         set_progress(
             progress,
             "downloading",

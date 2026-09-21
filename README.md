@@ -71,47 +71,42 @@ policy = "normal"
 enabled = true
 ```
 
-`enabled = true` means Browser Challenge protection is active. The optional Caddy integration can switch routes from the dashboard; leave it disabled when Nginx is your reverse proxy.
+`enabled = true` means Browser Challenge protection is active. In production, Bot Gate is the public frontend reverse proxy and `target` is the internal Nginx source address.
 
 Keep `verification.enabled = true` to require the Browser Challenge. `verification.cookie_ttl` controls the signed-cookie lifetime; `verification.challenge_ttl` controls how long a pending challenge is valid. Keep `verification.secret_file` on local storage and do not delete it while the service is running, or all existing cookies become invalid.
 
 The default upstream policy accepts local loopback/private targets and local DNS names. DNS targets are resolved on every request and are still accepted only when they resolve to a loopback, private, or link-local address; public addresses are rejected. Set either option to `false` when a stricter deployment policy is required.
 
-## Existing HTTPS server (Nginx/Caddy/ServBay)
+## Nginx as an internal source
 
-If another local server already owns ports 80/443, `https://cool.com/` will bypass Bot Gate unless that server forwards the `cool.com` virtual host to Bot Gate first. Configure the HTTPS virtual host (through the server's normal management UI) to reverse-proxy to `127.0.0.1:8080` and preserve the original `Host`; do not proxy it directly to the application on port `3000`. Otherwise use the direct Bot Gate URL `http://cool.com:8080/` for testing. Letting Bot Gate terminate TLS on port 443 is the alternative, but the existing HTTPS server must then release that port.
+Bot Gate is the **only public entry point**. Nginx remains the source server for HTML, static files, API and WebSocket traffic; Bot Gate never modifies or reloads Nginx configuration.
 
-For Nginx on Windows, leave `[caddy].enabled = false` and point each protected server block at the Bot Gate gateway listener:
+```text
+Browser → Bot Gate public listener → Nginx internal listener → application
+```
+
+For example, expose Bot Gate on `0.0.0.0:18081` and bind Nginx only to `127.0.0.1:18082`:
 
 ```nginx
 server {
-    listen 80;
-    server_name cool.com;
+    listen 127.0.0.1:18082;
+    server_name _;
 
-    location / {
-        proxy_pass http://127.0.0.1:8080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
+    # Keep all existing root, try_files, /api and WebSocket locations here.
 }
 ```
 
-Nginx must proxy to Bot Gate, not directly to the application port. Otherwise requests bypass Browser Challenge entirely.
+Then add this route in **前置代理站点**:
 
-### One-click Nginx discovery and protection
+```toml
+[[sites]]
+host = "172.22.31.39"
+target = "http://127.0.0.1:18082"
+policy = "normal"
+enabled = true
+```
 
-The management dashboard can configure this without manually editing every server block:
-
-1. Open **站点路由 → 接入 Nginx** and select the Nginx install directory or its `conf` directory. If `nginx` is not on `PATH`, enter the `nginx.exe`/`nginx` path too.
-2. Bot Gate scans `nginx.conf` and `*.conf` files below that directory and lists discovered `server_name`/`proxy_pass` sites.
-3. Click the protection icon for a site. Bot Gate backs up its config as `.botgate.bak`, changes that site's `proxy_pass` to the running gateway, preserves the original `Host`, runs `nginx -t`, and reloads Nginx. Turning protection off restores the original upstream from the backup.
-
-Only ordinary fixed-URL `proxy_pass http://...` blocks are changed automatically. Static `root` sites, variable upstreams, and unsupported directives remain visible but must be configured manually. The scanner does not modify files until protection is explicitly enabled.
+Set `[server].listen` to the public Bot Gate listener, for example `0.0.0.0:18081`, restart Bot Gate, start the gateway, and access `http://172.22.31.39:18081/`. Do not leave Nginx listening on a public address or its original public port: that path bypasses Browser Challenge.
 
 ## Management dashboard
 
@@ -145,11 +140,9 @@ Changes made in the dashboard are applied immediately. Bot Gate does not watch `
 If licensing is enabled, the dashboard's **激活许可证** action validates an Ed25519-signed `BG1.payload.signature` token and stores it in the configured license file. The token's signed `expires_at` is checked on every status read and cannot be extended by editing the local date.
 When licensing is enabled, an unlicensed or expired public request receives `402` before reverse proxying; the loopback-only management dashboard remains available for activation.
 
-### Pause protection without stopping the application
+### Pause protection
 
-When Caddy owns the public domain, enable the optional `[caddy]` section in `backend/config.toml`. The dashboard can then pause or resume protection for each configured site. Nginx does not use this section; leave it disabled and keep Nginx pointed at Bot Gate. Pausing protection through an external proxy is an explicit direct-upstream bypass and should only be done deliberately.
-
-This is an explicit operator action. Bot Gate remains fail-closed when it crashes or is stopped while protection is enabled.
+Pausing a route stops Browser Challenge for that route, but does not alter Nginx. Keep the Nginx source listener internal; exposing it publicly is always a bypass.
 
 ## Verify the gate with curl
 

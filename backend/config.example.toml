@@ -5,7 +5,8 @@
 [server]
 # The gateway listener is started manually from the management dashboard.
 # If this port is occupied, Bot Gate automatically selects a free port.
-# Use 0.0.0.0 only when the gate must be reachable from the LAN.
+# For production front-proxy mode, use a public listener such as
+# 0.0.0.0:18081, and bind Nginx only to an internal source port.
 listen = "127.0.0.1:8080"
 request_timeout_secs = 30
 max_header_bytes = 65536
@@ -99,10 +100,11 @@ allow_private_networks = true
 # to an allowed loopback/private address.
 allow_dns = true
 
-# Optional initial routes. You can leave this list empty and add sites from
-# the management dashboard after the package starts.
+# Optional initial front-proxy routes. `host` is the public hostname/IP sent
+# to Bot Gate; `target` is Nginx's internal HTTP listener. Bot Gate never
+# changes or reloads Nginx configuration.
 # [[sites]]
-# host = "project.local"
-# target = "http://127.0.0.1:3000"
+# host = "172.22.31.39"
+# target = "http://127.0.0.1:18082"
 # policy = "normal"
 # enabled = true
