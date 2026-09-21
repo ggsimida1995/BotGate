@@ -698,6 +698,19 @@ fn sync_nginx_sites(state: &AdminState, sites: &[NginxSite]) -> Result<()> {
             enabled: site.protected,
         })?;
     }
+    let discovered_hosts = sites
+        .iter()
+        .filter(|site| site.supported)
+        .map(|site| site.host.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    for site in state.storage.managed_sites()? {
+        if discovered_hosts.contains(site.host.as_str()) {
+            continue;
+        }
+        if site.target.starts_with("root ") || site.host == "localhost" {
+            state.storage.delete_site(&site.host)?;
+        }
+    }
     refresh_managed_runtime(state)
 }
 

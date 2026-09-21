@@ -1036,7 +1036,8 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
                             url.scheme() == "http" && (url.path().is_empty() || url.path() == "/")
                         });
                     let front_mode = !standard || front_target.is_some();
-                    let supported = host != "_" && (standard || listen_line.is_some());
+                    let supported =
+                        host != "_" && (standard || (listen_line.is_some() && proxies.len() > 1));
                     sites.push(ParsedSite {
                         id: site_id(path, &host, start),
                         host,
