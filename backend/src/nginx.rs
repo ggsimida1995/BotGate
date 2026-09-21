@@ -1124,15 +1124,15 @@ fn listen_spec(line: &str) -> Option<String> {
 fn replace_listen_target(line: &mut String, replacement: &str) -> Result<()> {
     let keyword = line.find("listen").context("Nginx listen 行无效")?;
     let value_start = keyword + "listen".len();
-    let whitespace = line[value_start..]
+    let token_start = line[value_start..]
         .find(|ch: char| !ch.is_whitespace())
         .map(|offset| value_start + offset)
         .context("Nginx listen 缺少端口")?;
-    let value_end = line[whitespace..]
-        .find(char::is_whitespace)
-        .map(|offset| whitespace + offset)
+    let token_end = line[token_start..]
+        .find(|ch: char| ch.is_whitespace() || ch == ';')
+        .map(|offset| token_start + offset)
         .unwrap_or(line.len());
-    line.replace_range(whitespace..value_end, replacement);
+    line.replace_range(token_start..token_end, replacement);
     Ok(())
 }
 
@@ -1319,6 +1319,16 @@ mod tests {
         assert!(sites[0].supported);
         assert!(sites[0].front_mode);
         assert_eq!(sites[0].listen_line, Some(1));
+    }
+
+    #[test]
+    fn replaces_only_the_listen_address_token() {
+        let mut line = "    listen 18081;".to_string();
+        replace_listen_target(&mut line, "127.0.0.1:40123").unwrap();
+        assert_eq!(line, "    listen 127.0.0.1:40123;");
+        let mut line = "listen 0.0.0.0:18081 default_server;".to_string();
+        replace_listen_target(&mut line, "127.0.0.1:40123").unwrap();
+        assert_eq!(line, "listen 127.0.0.1:40123 default_server;");
     }
 
     #[test]
