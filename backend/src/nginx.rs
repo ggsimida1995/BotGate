@@ -455,6 +455,9 @@ impl NginxManager {
     }
 
     fn reload_context(&self, config_dir: &Path) -> Option<(PathBuf, PathBuf)> {
+        if let Some(context) = nginx_config_context(config_dir) {
+            return Some(context);
+        }
         if let Some(config) = self.selected_config.as_deref() {
             let parent = config.parent().unwrap_or(config);
             let prefix = if parent.file_name().and_then(|name| name.to_str()) == Some("conf") {
@@ -1619,15 +1622,18 @@ server {
     }
 
     #[test]
-    fn reloads_the_selected_config_file_instead_of_the_default_config() {
+    fn reloads_the_main_config_when_a_child_config_is_selected() {
         let root = std::env::temp_dir().join(format!(
             "bot-gate-nginx-reload-context-test-{}-{}",
             std::process::id(),
             unix_test_suffix()
         ));
         fs::create_dir_all(&root).unwrap();
-        let config = root.join("nginx-test.conf");
-        fs::write(&config, "events {}\nhttp {}\n").unwrap();
+        let main = root.join("nginx.conf");
+        let config = root.join("sites-enabled").join("nginx-test.conf");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&main, "events {}\nhttp { include sites-enabled/*.conf; }\n").unwrap();
+        fs::write(&config, "server {}\n").unwrap();
 
         let mut manager = NginxManager::default();
         manager
@@ -1636,7 +1642,7 @@ server {
 
         assert_eq!(
             manager.reload_context(&root),
-            Some((root.clone(), config.clone()))
+            Some((root.clone(), main.clone()))
         );
 
         let _ = fs::remove_dir_all(root);
