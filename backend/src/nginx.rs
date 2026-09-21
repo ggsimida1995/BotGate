@@ -304,7 +304,7 @@ impl NginxManager {
                 }
                 let host = &site.host;
                 let front = format!(
-                    "\n\n# bot-gate: front-gateway\nserver {{\n    listen {original_listen};\n    server_name {host};\n    location / {{\n        proxy_pass http://{gateway_address};\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_http_version 1.1;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n    }}\n}}\n"
+                    "\n\nserver {{\n    # bot-gate: front-gateway\n    listen {original_listen};\n    server_name {host};\n    location / {{\n        proxy_pass http://{gateway_address};\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;\n        proxy_set_header X-Forwarded-Proto $scheme;\n        proxy_http_version 1.1;\n        proxy_set_header Upgrade $http_upgrade;\n        proxy_set_header Connection \"upgrade\";\n    }}\n}}\n"
                 );
                 let mut candidate = join_lines(&lines, source.ends_with('\n'));
                 candidate.push_str(&front);
@@ -326,7 +326,7 @@ impl NginxManager {
             return self
                 .scan()?
                 .into_iter()
-                .find(|value| value.host == site.host)
+                .find(|value| value.id == site.id)
                 .context("Nginx 配置刷新后未找到站点");
         }
         let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
@@ -1006,7 +1006,12 @@ fn parse_file(path: &Path, source: &str) -> Vec<ParsedSite> {
             let block = &lines[start..end];
             let is_front_gateway = block
                 .iter()
-                .any(|line| line.contains("bot-gate: front-gateway"));
+                .any(|line| line.contains("bot-gate: front-gateway"))
+                || lines[..start]
+                    .iter()
+                    .rev()
+                    .find(|line| !line.trim().is_empty())
+                    .is_some_and(|line| line.contains("bot-gate: front-gateway"));
             let hosts = server_names(block);
             let listen_line = block.iter().enumerate().find_map(|(offset, line)| {
                 directive_value(without_comment(line), "listen").map(|_| start + offset)
@@ -1301,6 +1306,76 @@ mod tests {
         assert_eq!(sites[0].target, "http://127.0.0.1:3000");
         assert!(sites[0].supported);
         assert!(!sites[0].protected);
+    }
+
+    #[test]
+    fn ignores_generated_front_gateway_server_block() {
+        let source = "\
+server {
+    listen 127.0.0.1:58528; # bot-gate: managed front-proxy upstream=http://127.0.0.1:58528
+    server_name 172.22.31.39;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+    }
+}
+
+# bot-gate: front-gateway
+server {
+    listen 80;
+    server_name 172.22.31.39;
+    location / {
+        proxy_pass http://127.0.0.1:58691;
+    }
+}
+        ";
+        let sites = parse_file(Path::new("nginx.conf"), source);
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].host, "172.22.31.39");
+        assert_eq!(sites[0].target, "http://127.0.0.1:3000");
+        assert!(sites[0].protected);
+    }
+
+    #[test]
+    fn scans_one_protected_site_after_front_gateway_is_generated() {
+        let root = std::env::temp_dir().join(format!(
+            "bot-gate-front-gateway-scan-test-{}-{}",
+            std::process::id(),
+            unix_test_suffix()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        fs::write(
+            root.join("nginx.conf"),
+            "\
+server {
+    listen 127.0.0.1:58528; # bot-gate: managed front-proxy upstream=http://127.0.0.1:58528
+    server_name 172.22.31.39;
+    location / {
+        proxy_pass http://127.0.0.1:3000;
+    }
+}
+
+# bot-gate: front-gateway
+server {
+    listen 80;
+    server_name 172.22.31.39;
+    location / {
+        proxy_pass http://127.0.0.1:58691;
+    }
+}
+",
+        )
+        .unwrap();
+
+        let mut manager = NginxManager::default();
+        manager.configure(root.display().to_string(), None).unwrap();
+        let sites = manager.scan().unwrap();
+
+        assert_eq!(sites.len(), 1);
+        assert_eq!(sites[0].host, "172.22.31.39");
+        assert_eq!(sites[0].target, "http://127.0.0.1:58528");
+        assert!(sites[0].protected);
+
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
