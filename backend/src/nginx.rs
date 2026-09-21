@@ -145,9 +145,9 @@ impl NginxManager {
         }
         let selected_config = self.selected_config.clone();
         let (prefix_dir, main_config) = if let Some(config_file) = selected_config.as_deref() {
-            let prefix = nginx_config_context(config_dir)
+            let prefix = selected_config_context(config_dir, config_file)
                 .map(|(prefix, _)| prefix)
-                .unwrap_or_else(|| config_dir.to_path_buf());
+                .unwrap_or_else(|| config_file.parent().unwrap_or(config_dir).to_path_buf());
             (prefix, Some(config_file.to_path_buf()))
         } else if let Some((prefix, main)) = nginx_config_context(config_dir) {
             (prefix, Some(main))
@@ -409,6 +409,9 @@ impl NginxManager {
             .context("请先设置 Web 服务目录")?;
         let binary = self.binary_path();
         let context = self.reload_context(config_dir);
+        if self.selected_config.is_some() && context.is_none() {
+            bail!("无法确定包含所选 Nginx 子配置的主配置，请确认该文件已被 nginx.conf 的 include 引入");
+        }
         let test = if let Some((prefix_dir, config)) = context.as_ref() {
             let relative_config = config.strip_prefix(prefix_dir).unwrap_or(config);
             nginx_command(&binary)
@@ -455,19 +458,41 @@ impl NginxManager {
     }
 
     fn reload_context(&self, config_dir: &Path) -> Option<(PathBuf, PathBuf)> {
-        if let Some(context) = nginx_config_context(config_dir) {
-            return Some(context);
-        }
         if let Some(config) = self.selected_config.as_deref() {
-            let parent = config.parent().unwrap_or(config);
-            let prefix = if parent.file_name().and_then(|name| name.to_str()) == Some("conf") {
-                parent.parent().unwrap_or(parent).to_path_buf()
-            } else {
-                parent.to_path_buf()
-            };
-            return Some((prefix, config.to_path_buf()));
+            if let Some(context) = self.runtime_config_context(config) {
+                return Some(context);
+            }
+            if let Some(context) = selected_config_context(config_dir, config) {
+                return Some(context);
+            }
+            return None;
         }
         nginx_config_context(config_dir)
+    }
+
+    fn runtime_config_context(&self, selected_config: &Path) -> Option<(PathBuf, PathBuf)> {
+        let output = nginx_command(&self.binary_path())
+            .args(["-T"])
+            .output()
+            .ok()?;
+        let dump = format!(
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let mut files = dumped_config_files(&dump);
+        files.dedup();
+        let main = files.first()?.clone();
+        if files.iter().any(|file| same_path(file, selected_config)) {
+            let parent = main.parent()?;
+            let prefix = if parent.file_name().and_then(|name| name.to_str()) == Some("conf") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            return Some((prefix.to_path_buf(), main));
+        }
+        None
     }
 
     fn binary_path(&self) -> PathBuf {
@@ -1255,6 +1280,62 @@ fn nginx_config_context(config_dir: &Path) -> Option<(PathBuf, PathBuf)> {
         }
     }
     None
+}
+
+fn selected_config_context(
+    config_dir: &Path,
+    selected_config: &Path,
+) -> Option<(PathBuf, PathBuf)> {
+    for root in config_roots(config_dir) {
+        for config in [
+            root.join("nginx.conf"),
+            root.join("conf/nginx.conf"),
+            root.join("etc/nginx/nginx.conf"),
+        ] {
+            if !config.is_file() {
+                continue;
+            }
+            let parent = config.parent().unwrap_or(&root);
+            let prefix = if parent.file_name().and_then(|name| name.to_str()) == Some("conf") {
+                parent.parent().unwrap_or(parent)
+            } else {
+                parent
+            };
+            let mut files = vec![config.clone()];
+            let _ = collect_included_files(prefix, &mut files);
+            if files.iter().any(|file| same_path(file, selected_config)) {
+                return Some((prefix.to_path_buf(), config));
+            }
+        }
+    }
+    None
+}
+
+fn config_roots(config_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    let mut current = if config_dir.is_file() {
+        config_dir.parent().unwrap_or(config_dir)
+    } else {
+        config_dir
+    };
+    loop {
+        roots.push(current.to_path_buf());
+        let Some(parent) = current.parent() else {
+            break;
+        };
+        if parent == current {
+            break;
+        }
+        current = parent;
+    }
+    roots
+}
+
+fn same_path(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 fn replace_proxy_target(line: &mut String, replacement: &str) -> Result<()> {
