@@ -395,9 +395,17 @@ fn version_parts(value: &str) -> [u64; 3] {
 }
 
 fn platform_package_suffix() -> &'static str {
-    #[cfg(target_os = "windows")]
+    #[cfg(all(target_os = "windows", target_arch = "x86_64"))]
     {
-        "-windows-x64-setup.exe"
+        "-windows-x64.msi"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "x86"))]
+    {
+        "-windows-x86.msi"
+    }
+    #[cfg(all(target_os = "windows", target_arch = "aarch64"))]
+    {
+        "-windows-arm64.msi"
     }
     #[cfg(target_os = "macos")]
     {
@@ -465,7 +473,7 @@ async fn schedule_windows_update(temp_dir: &Path, package_name: &str) -> Result<
 #[cfg(any(target_os = "windows", test))]
 fn windows_update_script(parent_pid: u32, installer: &Path, executable: &Path) -> String {
     format!(
-        "$ErrorActionPreference = 'Stop'\n$parentPid = {pid}\n$log = Join-Path $env:TEMP 'bot-gate-update.log'\n\"Bot Gate update started $(Get-Date -Format o)\" | Set-Content -LiteralPath $log\ntry {{\n  $deadline = (Get-Date).AddMinutes(5)\n  while ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 500 }}\n  if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{ throw '旧进程在 5 分钟内没有退出' }}\n  \"Starting installer $(Get-Date -Format o)\" | Add-Content -LiteralPath $log\n  $installerProcess = Start-Process -FilePath {installer} -ArgumentList @('/S') -WorkingDirectory {working_directory} -PassThru -Wait\n  if ($installerProcess.ExitCode -ne 0) {{ throw \"安装器退出码: $($installerProcess.ExitCode)\" }}\n  if (-not (Test-Path -LiteralPath {executable})) {{ throw '安装完成后未找到桌面程序' }}\n  Start-Process -FilePath {executable} -WorkingDirectory {working_directory}\n  \"Bot Gate update completed $(Get-Date -Format o)\" | Add-Content -LiteralPath $log\n}} catch {{\n  \"Bot Gate update failed: $($_.Exception.Message)\" | Add-Content -LiteralPath $log\n  exit 1\n}} finally {{\n  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\n}}\n",
+        "$ErrorActionPreference = 'Stop'\n$parentPid = {pid}\n$log = Join-Path $env:TEMP 'bot-gate-update.log'\n\"Bot Gate update started $(Get-Date -Format o)\" | Set-Content -LiteralPath $log\ntry {{\n  $deadline = (Get-Date).AddMinutes(5)\n  while ((Get-Process -Id $parentPid -ErrorAction SilentlyContinue) -and (Get-Date) -lt $deadline) {{ Start-Sleep -Milliseconds 500 }}\n  if (Get-Process -Id $parentPid -ErrorAction SilentlyContinue) {{ throw '旧进程在 5 分钟内没有退出' }}\n  \"Starting installer $(Get-Date -Format o)\" | Add-Content -LiteralPath $log\n  $installerProcess = Start-Process -FilePath 'msiexec.exe' -ArgumentList @('/i', {installer}, '/qn', '/norestart') -WorkingDirectory {working_directory} -PassThru -Wait\n  if ($installerProcess.ExitCode -ne 0) {{ throw \"安装器退出码: $($installerProcess.ExitCode)\" }}\n  if (-not (Test-Path -LiteralPath {executable})) {{ throw '安装完成后未找到桌面程序' }}\n  Start-Process -FilePath {executable} -WorkingDirectory {working_directory}\n  \"Bot Gate update completed $(Get-Date -Format o)\" | Add-Content -LiteralPath $log\n}} catch {{\n  \"Bot Gate update failed: $($_.Exception.Message)\" | Add-Content -LiteralPath $log\n  exit 1\n}} finally {{\n  Remove-Item -LiteralPath $MyInvocation.MyCommand.Path -Force -ErrorAction SilentlyContinue\n}}\n",
         pid = parent_pid,
         installer = powershell_quote(&installer),
         executable = powershell_quote(&executable),
@@ -607,17 +615,18 @@ mod tests {
     }
 
     #[test]
-    fn windows_update_script_runs_the_nsis_installer_and_relaunches() {
+    fn windows_update_script_runs_the_msi_installer_and_relaunches() {
         let script = windows_update_script(
             1234,
-            Path::new(r"C:\Users\test\AppData\Local\Temp\BotGate-setup.exe"),
-            Path::new(r"C:\Program Files\BotGate\网站卫士.exe"),
+            Path::new(r"C:\Users\test\AppData\Local\Temp\BotGate.msi"),
+            Path::new(r"C:\Program Files\Bot Gate\Bot Gate.exe"),
         );
         assert!(script.contains("$parentPid = 1234"));
-        assert!(script.contains("-ArgumentList @('/S')"));
+        assert!(script.contains("-FilePath 'msiexec.exe'"));
+        assert!(script.contains("-ArgumentList @('/i', 'C:\\Users\\test\\AppData\\Local\\Temp\\BotGate.msi', '/qn', '/norestart')"));
         assert!(script.contains("-PassThru -Wait"));
         assert!(
-            script.contains("Start-Process -FilePath 'C:\\Program Files\\BotGate\\网站卫士.exe'")
+            script.contains("Start-Process -FilePath 'C:\\Program Files\\Bot Gate\\Bot Gate.exe'")
         );
     }
 }

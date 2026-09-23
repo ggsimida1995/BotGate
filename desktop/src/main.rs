@@ -88,7 +88,7 @@ fn main() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("网站卫士桌面客户端初始化失败")
+        .expect("Bot Gate desktop client initialization failed")
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 stop_backend(app);
@@ -226,7 +226,7 @@ fn wait_for_admin(
 fn create_window(app: &mut tauri::App, admin_url: &str) -> Result<(), Box<dyn std::error::Error>> {
     let url = url::Url::parse(admin_url)?;
     WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url))
-        .title("网站卫士")
+        .title("Bot Gate")
         .inner_size(1280.0, 800.0)
         .min_inner_size(960.0, 620.0)
         .center()
@@ -235,15 +235,15 @@ fn create_window(app: &mut tauri::App, admin_url: &str) -> Result<(), Box<dyn st
 }
 
 fn create_tray(app: &mut tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    let open = MenuItem::with_id(app, "open", "打开管理台", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "退出网站卫士", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open Dashboard", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Bot Gate", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&open, &quit])?;
     TrayIconBuilder::new()
         .icon(tauri::image::Image::from_bytes(include_bytes!(
             "../../packaging/assets/bot-gate-icon.png"
         ))?)
         .menu(&menu)
-        .tooltip("网站卫士")
+        .tooltip("Bot Gate")
         .on_menu_event(|app, event| match event.id.as_ref() {
             "open" => show_window(app),
             "quit" => {

@@ -30,7 +30,7 @@ DNS-aware SSRF checks are complete. Domain upstreams are opt-in via `upstream.al
 
 ## Phase 7 — release pipeline complete
 
-GitHub Actions builds Windows x64, Linux x64 and macOS arm64 archives with SHA-256 checksums. The current workflow builds directly from this repository; source/release repository separation remains future work. Windows Service commands and systemd/launchd examples also remain future work.
+GitHub Actions builds Linux x64 archives, Windows x64, x86 and ARM64 MSI installers, plus a macOS arm64 disk image with SHA-256 checksums. The current workflow builds directly from this repository; source/release repository separation remains future work. Windows Service commands and systemd/launchd examples also remain future work.
 
 ## Deferred by design
 

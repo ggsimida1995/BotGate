@@ -1,6 +1,6 @@
 [package]
 name = "bot-gate-desktop"
-version = "0.2.41"
+version = "0.2.42"
 edition = "2021"
 description = "Bot Gate desktop management client"
 license = "MIT"

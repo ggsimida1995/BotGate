@@ -84,7 +84,7 @@ jobs:
           (cd desktop && cargo tauri build --ci --bundles app)
           app=$(find desktop/target/release/bundle/macos -maxdepth 1 -type d -name '*.app' -print -quit)
           test -n "$app"
-          hdiutil create -volname "网站卫士" -srcfolder "$app" -ov -format UDZO "BotGate-${version}-macos-arm64.dmg"
+          hdiutil create -volname "Bot Gate" -srcfolder "$app" -ov -format UDZO "BotGate-${version}-macos-arm64.dmg"
           shasum -a 256 "BotGate-${version}-macos-arm64.dmg" > "BotGate-${version}-macos-arm64.dmg.sha256"
       - uses: softprops/action-gh-release@v2
         with:
@@ -93,11 +93,29 @@ jobs:
             BotGate-*.dmg.sha256
 
   windows:
-    name: Windows x64
+    name: Windows ${{ matrix.arch }} MSI
     runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            arch: x64
+            msvc_arch: amd64
+          - target: i686-pc-windows-msvc
+            arch: x86
+            msvc_arch: amd64_x86
+          - target: aarch64-pc-windows-msvc
+            arch: arm64
+            msvc_arch: amd64_arm64
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ matrix.msvc_arch }}
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -110,7 +128,7 @@ jobs:
       - name: Build backend
         working-directory: backend
         shell: pwsh
-        run: cargo build --release --locked
+        run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Install Tauri CLI
         shell: pwsh
         run: cargo install tauri-cli --version "^2" --locked
@@ -118,9 +136,11 @@ jobs:
         shell: pwsh
         run: |
           $version = $env:GITHUB_REF_NAME.Substring(1)
+          $target = "${{ matrix.target }}"
+          $arch = "${{ matrix.arch }}"
           if (Test-Path desktop/resources) { Remove-Item desktop/resources -Recurse -Force }
           New-Item -ItemType Directory -Force desktop/resources/frontend | Out-Null
-          Copy-Item backend/target/release/bot-gate.exe desktop/resources/bot-gate-backend.exe
+          Copy-Item "backend/target/$target/release/bot-gate.exe" desktop/resources/bot-gate-backend.exe
           Copy-Item backend/config.example.toml desktop/resources/config.toml
           Copy-Item frontend/dist desktop/resources/frontend/ -Recurse
           if (-not (Test-Path desktop/resources/config.toml)) { throw "config.toml missing from bundle" }
@@ -133,15 +153,15 @@ jobs:
           $desktopCargo = [regex]::Replace($desktopCargo, '(?m)^version = "[^"]*"', ('version = "' + $version + '"'), 1)
           Set-Content desktop/Cargo.toml $desktopCargo -NoNewline
           Push-Location desktop
-          cargo tauri build --ci --bundles nsis
+          cargo tauri build --ci --target $target --bundles msi
           Pop-Location
-          $installer = Get-ChildItem desktop/target/release/bundle/nsis/*setup.exe | Select-Object -First 1
-          if (-not $installer) { throw "Tauri installer was not created" }
-          Copy-Item $installer.FullName "BotGate-$version-windows-x64-setup.exe"
-          $hash = (Get-FileHash "BotGate-$version-windows-x64-setup.exe" -Algorithm SHA256).Hash.ToLower()
-          "$hash  BotGate-$version-windows-x64-setup.exe" | Set-Content "BotGate-$version-windows-x64-setup.exe.sha256"
+          $installer = Get-ChildItem "desktop/target/$target/release/bundle/msi/*.msi" | Select-Object -First 1
+          if (-not $installer) { throw "Tauri MSI installer was not created" }
+          Copy-Item $installer.FullName "BotGate-$version-windows-$arch.msi"
+          $hash = (Get-FileHash "BotGate-$version-windows-$arch.msi" -Algorithm SHA256).Hash.ToLower()
+          "$hash  BotGate-$version-windows-$arch.msi" | Set-Content "BotGate-$version-windows-$arch.msi.sha256"
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            BotGate-*-setup.exe
-            BotGate-*-setup.exe.sha256
+            BotGate-*-windows-*.msi
+            BotGate-*-windows-*.msi.sha256

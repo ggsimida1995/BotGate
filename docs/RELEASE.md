@@ -2,9 +2,9 @@
 
 Bot Gate 的发布包由 GitHub Actions 在推送 `v*` 标签时自动生成，包含：
 
-- Linux 包包含 `bot-gate`、`frontend/dist` 和可复制修改的 `config.toml`，管理台通过本机 Web 页面访问；
-- macOS `.dmg` 包含完整 Tauri 2 `.app`，内含 React 管理界面、Rust 后端和默认配置；
-- Windows 安装程序包含 Tauri 2 桌面客户端、Rust 后端和默认配置；
+- Linux x64 包含 `bot-gate`、`frontend/dist` 和可复制修改的 `config.toml`；
+- macOS arm64 `.dmg` 包含完整 Tauri 2 `.app`，内含 React 管理界面、Rust 后端和默认配置；
+- Windows x64、x86 和 ARM64 MSI 安装程序包含 Tauri 2 桌面客户端、Rust 后端和默认配置；
 - `LICENSE` 与 `README.md`。
 
 ## 发布
@@ -14,7 +14,7 @@ git tag v0.1.0
 git push origin v0.1.0
 ```
 
-工作流会生成 Linux x64 压缩包、macOS arm64 安装磁盘映像（`.dmg`）和 Windows x64 安装程序（`.exe`），并附加到 GitHub Release。
+工作流会生成 Linux x64 压缩包、macOS arm64 安装磁盘映像（`.dmg`）以及 Windows x64、x86、ARM64 安装程序（`.msi`），并附加到 GitHub Release。
 版本号来自仓库的 `backend/Cargo.toml`，例如 `Cargo.toml` 为 `0.2.8` 时使用 `v0.2.8`。
 
 Windows/macOS 桌面端的开发启动方式：先在仓库根目录构建 `frontend` 和 `backend`，然后执行 `cargo tauri dev --manifest-path desktop/Cargo.toml`。正式构建前，将后端可执行文件、`config.toml` 和 `frontend/dist` 放入 `desktop/resources/`，再执行 `cargo tauri build`。
@@ -41,7 +41,7 @@ enabled = true
 release_url = "https://api.github.com/repos/<owner>/<repo>/releases/latest"
 ```
 
-管理台的“检查更新”会读取 GitHub Release JSON，比较 `tag_name`。发现新版本后，点击“下载并立即更新”会下载当前平台安装包与对应 `.sha256` 文件；只有校验通过后才启动独立更新器。Windows 以静默安装器升级，macOS 用临时脚本替换 `.app`，Linux 解压并替换程序和前端资源；三者都会保留现有 `config.toml`、许可证和 `data/`，然后自动重启。更新地址及所有 Release 资产地址必须是 HTTPS。
+管理台的“检查更新”会读取 GitHub Release JSON，比较 `tag_name`。发现新版本后，点击“下载并立即更新”会下载当前平台安装包与对应 `.sha256` 文件；只有校验通过后才启动独立更新器。Windows 以静默 MSI 安装器升级，macOS 用临时脚本替换 `.app`，Linux 解压并替换程序和前端资源；三者都会保留现有 `config.toml`、许可证和 `data/`，然后自动重启。更新地址及所有 Release 资产地址必须是 HTTPS。
 
 发布包启动后会自动运行 Bot Gate 前置反向代理，同时保留本机管理端口；管理台仍可手动停止或重新启动网关。启用许可证时，网关启动接口会先验证本地许可证文件和签名有效期；许可证无效时只保留管理台，公网网关不会监听。
 

@@ -1051,7 +1051,7 @@ async fn run() -> Result<()> {
         {
             if !headless {
                 bail!(
-                    "Windows 和 macOS 请从网站卫士桌面客户端启动；后端子进程需要 --headless 参数"
+                    "Windows 和 macOS 请从 Bot Gate 桌面客户端启动；后端子进程需要 --headless 参数"
                 );
             }
             let _tray_handle = tray_handle;
@@ -1145,7 +1145,7 @@ fn report_startup_error(error: &anyhow::Error, log_path: &Path) {
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
-        let title: Vec<u16> = std::ffi::OsStr::new("Bot Gate 启动失败")
+        let title: Vec<u16> = std::ffi::OsStr::new("Bot Gate Startup Failed")
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
