@@ -102,7 +102,7 @@ impl GatewayController {
                     "address is already in use; stop the conflicting service or change server.listen"
                 }
                 ErrorKind::PermissionDenied => {
-                    "permission denied; choose an allowed listener address or run with the required permission"
+                    "permission denied (Windows error 10013 usually means the port is reserved); choose another listener such as 127.0.0.1:18081 or run with the required permission"
                 }
                 _ => "check the listener address and operating-system error",
             };

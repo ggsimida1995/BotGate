@@ -57,7 +57,7 @@ Add the configured hosts to the local hosts file:
 
 The hosts file is `/etc/hosts` on macOS/Linux and `C:\Windows\System32\drivers\etc\hosts` on Windows. `.test` is recommended for local development.
 
-Bot Gate 启动后会自动打开前置网关，然后打开 `http://project-a.test:8080`。Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream. 网关停止时，前置端口不监听，访问会失败；这是为了确保请求不会绕过验证直接到达上游。
+Bot Gate 启动后会自动打开前置网关，然后打开 `http://project-a.test:18081`。Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream. 网关停止时，前置端口不监听，访问会失败；这是为了确保请求不会绕过验证直接到达上游。
 
 ## Configure a site
 
@@ -157,8 +157,8 @@ Pausing a route stops Browser Challenge for that route, but does not alter the s
 ## Verify the gate with curl
 
 ```text
-curl -i -H "Host: project-a.test" http://127.0.0.1:8080/
-curl -i -H "Host: project-a.test" -H "Accept: application/json" http://127.0.0.1:8080/api/user
+curl -i -H "Host: project-a.test" http://127.0.0.1:18081/
+curl -i -H "Host: project-a.test" -H "Accept: application/json" http://127.0.0.1:18081/api/user
 ```
 
 The first command should return `302` with a `/__bot_verify/start` location. The second should return `403`. A whitelist entry may change rate/risk handling, but `skip_challenge` never bypasses signed browser verification.
@@ -167,7 +167,7 @@ The first command should return `302` with a `/__bot_verify/start` location. The
 
 Press `Ctrl-C` to stop Bot Gate. If startup fails, check that the configured ports are free, the upstream is running, `backend/config.toml` is valid, and `frontend/dist/admin.html` and `frontend/dist/challenge.html` are present in the repository. If a browser keeps receiving a challenge, clear the site cookie and verify that the request Host exactly matches a configured `[[sites]]` host.
 
-On Windows desktop, startup diagnostics are written next to the persistent app configuration: `%APPDATA%\com.ggsimida.botgate\logs\desktop.log`, `%APPDATA%\com.ggsimida.botgate\logs\desktop-backend.log`, and `%APPDATA%\com.ggsimida.botgate\logs\bot-gate.log`. The first records desktop launch and admin startup timeout, the second captures backend stdout/stderr, and the third contains timestamped backend startup/runtime logs. If startup fails, send these logs with secrets and private hostnames redacted.
+On Windows desktop, startup diagnostics are written to the installation directory's `logs` folder: `<Bot Gate installation directory>\logs\desktop.log`, `<Bot Gate installation directory>\logs\desktop-backend.log`, and `<Bot Gate installation directory>\logs\bot-gate.log`. If the installation directory is not writable, the desktop falls back to `%APPDATA%\com.ggsimida.botgate\logs\`. The first records desktop launch and admin startup timeout, the second captures backend stdout/stderr, and the third contains timestamped backend startup/runtime logs. Existing desktop configs that still use the old default `127.0.0.1:8080` are migrated once to `127.0.0.1:18081`; manually configured listener values are left unchanged. If startup fails, send these logs with secrets and private hostnames redacted.
 
 ## Development checks
 

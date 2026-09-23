@@ -261,6 +261,17 @@ fn startup_log_path_is_next_to_the_config() {
 }
 
 #[test]
+fn startup_log_path_can_use_the_install_directory() {
+    let config =
+        std::path::Path::new(r"C:\Users\admin\AppData\Roaming\com.ggsimida.botgate\config.toml");
+    let install_logs = std::path::Path::new(r"C:\Program Files\Bot Gate\logs");
+    assert_eq!(
+        startup_log_path_with_directory(config, Some(install_logs)),
+        install_logs.join("bot-gate.log")
+    );
+}
+
+#[test]
 fn startup_failure_message_points_to_full_log() {
     let error = anyhow::anyhow!("failed to bind gateway listener 127.0.0.1:8080");
     let message = startup_error_message(

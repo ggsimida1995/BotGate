@@ -23,6 +23,8 @@ macOS 安装包内含完整的 Tauri 2 `.app`，其中包含 React 管理界面�
 
 Windows 安装程序会把 Tauri 2 桌面客户端、后端、默认配置和应用图标安装到当前用户的 Bot Gate 目录，并创建开始菜单快捷方式；安装完成后会直接打开桌面管理窗口，同时保留系统托盘菜单。macOS 版打开 Tauri 管理窗口并保留菜单栏图标，可用于聚焦窗口或退出 Bot Gate。
 
+Windows 桌面日志默认位于安装目录的 `logs/`：`desktop.log`、`desktop-backend.log` 和 `bot-gate.log`。安装目录不可写时回退到 `%APPDATA%\com.ggsimida.botgate\logs\`。
+
 应用图标源文件位于 `packaging/assets/`：SVG 源稿、压缩 PNG、Windows `.ico` 和 macOS `.icns`。发布包不包含带水印的原始设计图。
 
 ## Windows 启动

@@ -29,14 +29,36 @@ struct RuntimePaths {
     backend: PathBuf,
     config: PathBuf,
     frontend: PathBuf,
+    logs: PathBuf,
 }
 
-fn log_path(config: &Path, name: &str) -> PathBuf {
-    config
+fn log_path(logs: &Path, name: &str) -> PathBuf {
+    logs.join(name)
+}
+
+fn writable_log_directory(app: &tauri::AppHandle) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let install_logs = std::env::current_exe()?
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("logs")
-        .join(name)
+        .join("logs");
+    if can_write_directory(&install_logs).is_ok() {
+        return Ok(install_logs);
+    }
+
+    let fallback = app.path().app_data_dir()?.join("logs");
+    can_write_directory(&fallback)?;
+    Ok(fallback)
+}
+
+fn can_write_directory(directory: &Path) -> std::io::Result<()> {
+    fs::create_dir_all(directory)?;
+    let probe = directory.join(".write-test");
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(&probe)?;
+    fs::remove_file(probe)
 }
 
 fn append_log(path: &Path, message: &str) -> std::io::Result<()> {
@@ -53,7 +75,7 @@ fn main() {
             let paths = runtime_paths(app.handle())?;
             let port = available_port()?;
             let admin_url = format!("http://127.0.0.1:{port}");
-            let desktop_log = log_path(&paths.config, "desktop.log");
+            let desktop_log = log_path(&paths.logs, "desktop.log");
             append_log(
                 &desktop_log,
                 &format!(
@@ -107,6 +129,7 @@ fn runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, Box<dyn std::er
             backend: bundled_backend,
             config,
             frontend: bundled_frontend,
+            logs: writable_log_directory(app)?,
         });
     }
 
@@ -125,10 +148,12 @@ fn runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, Box<dyn std::er
     } else {
         root.join("backend/config.example.toml")
     };
+    let logs = writable_log_directory(app)?;
     Ok(RuntimePaths {
         backend,
         config,
         frontend: root.join("frontend/dist"),
+        logs,
     })
 }
 
@@ -141,8 +166,34 @@ fn persistent_config(
     let config = config_dir.join("config.toml");
     if !config.exists() {
         fs::copy(bundled_config, &config)?;
+    } else {
+        migrate_legacy_default_listener(&config)?;
     }
     Ok(config)
+}
+
+fn migrate_legacy_default_listener(config: &Path) -> std::io::Result<()> {
+    let content = fs::read_to_string(config)?;
+    let mut in_server = false;
+    let mut changed = false;
+    let mut migrated = String::with_capacity(content.len());
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_server = trimmed == "[server]";
+        }
+        if in_server && trimmed == r#"listen = "127.0.0.1:8080""# {
+            migrated.push_str(&line.replace("127.0.0.1:8080", "127.0.0.1:18081"));
+            changed = true;
+        } else {
+            migrated.push_str(line);
+        }
+        migrated.push('\n');
+    }
+    if changed {
+        fs::write(config, migrated)?;
+    }
+    Ok(())
 }
 
 fn available_port() -> Result<u16, Box<dyn std::error::Error>> {
@@ -157,7 +208,7 @@ fn start_backend(paths: &RuntimePaths, port: u16) -> Result<Child, Box<dyn std::
     if !paths.frontend.join("admin.html").exists() {
         return Err(format!("未找到管理界面资源：{}", paths.frontend.display()).into());
     }
-    let backend_log = log_path(&paths.config, "desktop-backend.log");
+    let backend_log = log_path(&paths.logs, "desktop-backend.log");
     if let Some(parent) = backend_log.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -183,6 +234,7 @@ fn start_backend(paths: &RuntimePaths, port: u16) -> Result<Child, Box<dyn std::
         .arg(&paths.config)
         .env("BOT_GATE_ADMIN_LISTEN", format!("127.0.0.1:{port}"))
         .env("BOT_GATE_FRONTEND_DIST", &paths.frontend)
+        .env("BOT_GATE_LOG_DIR", &paths.logs)
         .env("BOT_GATE_DESKTOP_EXECUTABLE", desktop_executable)
         .env("BOT_GATE_DESKTOP_PID", std::process::id().to_string());
     #[cfg(target_os = "windows")]

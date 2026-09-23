@@ -373,7 +373,7 @@ pub(crate) fn default_site_mode() -> String {
 }
 
 pub(crate) fn default_listen() -> String {
-    "127.0.0.1:8080".to_string()
+    "127.0.0.1:18081".to_string()
 }
 
 pub(crate) fn default_request_timeout() -> u64 {

@@ -73,14 +73,24 @@ const DEFAULT_CONFIG: &str = "config.toml";
 const LOG_DIRECTORY: &str = "logs";
 const LOG_FILE: &str = "bot-gate.log";
 const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
+const LOG_DIRECTORY_ENV: &str = "BOT_GATE_LOG_DIR";
 pub(crate) const NGINX_SETTINGS_KEY: &str = "nginx_config";
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn startup_log_path(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(LOG_DIRECTORY)
+    let configured_directory = env::var_os(LOG_DIRECTORY_ENV).map(PathBuf::from);
+    startup_log_path_with_directory(config_path, configured_directory.as_deref())
+}
+
+fn startup_log_path_with_directory(config_path: &Path, log_directory: Option<&Path>) -> PathBuf {
+    log_directory
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| {
+            config_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join(LOG_DIRECTORY)
+        })
         .join(LOG_FILE)
 }
 
@@ -955,8 +965,9 @@ async fn run() -> Result<()> {
     if !state.license.enabled || license.status == "active" {
         gateway.start().await.with_context(|| {
             format!(
-                "failed to start the Bot Gate front proxy on {}; see {}",
+                "failed to start the Bot Gate front proxy on {}; configuration: {}; see {}",
                 config.server.listen,
+                config_path.display(),
                 log_path.display()
             )
         })?;
