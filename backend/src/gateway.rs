@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{extract::Extension, routing::get, Router};
@@ -96,9 +96,19 @@ impl GatewayController {
             .http_listen
             .parse()
             .with_context(|| format!("invalid gateway listener address: {}", self.http_listen))?;
-        let listener = TcpListener::bind(configured)
-            .await
-            .with_context(|| format!("failed to bind gateway listener {configured}"))?;
+        let listener = TcpListener::bind(configured).await.map_err(|error| {
+            let hint = match error.kind() {
+                ErrorKind::AddrInUse => {
+                    "address is already in use; stop the conflicting service or change server.listen"
+                }
+                ErrorKind::PermissionDenied => {
+                    "permission denied; choose an allowed listener address or run with the required permission"
+                }
+                _ => "check the listener address and operating-system error",
+            };
+            anyhow::Error::new(error)
+                .context(format!("failed to bind gateway listener {configured}; {hint}"))
+        })?;
         let http_address = listener.local_addr()?;
         let app = public_app(self.state.clone(), self.body_limit, "http");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();

@@ -1,7 +1,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::{
-    fs,
+    fs::{self, OpenOptions},
+    io::Write,
     net::{TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
@@ -30,14 +31,47 @@ struct RuntimePaths {
     frontend: PathBuf,
 }
 
+fn log_path(config: &Path, name: &str) -> PathBuf {
+    config
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("logs")
+        .join(name)
+}
+
+fn append_log(path: &Path, message: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    writeln!(file, "{message}")
+}
+
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
             let paths = runtime_paths(app.handle())?;
             let port = available_port()?;
             let admin_url = format!("http://127.0.0.1:{port}");
-            let mut backend = start_backend(&paths, port)?;
-            if let Err(error) = wait_for_admin(port) {
+            let desktop_log = log_path(&paths.config, "desktop.log");
+            append_log(
+                &desktop_log,
+                &format!(
+                    "starting desktop; backend={} config={} frontend={} admin={}",
+                    paths.backend.display(),
+                    paths.config.display(),
+                    paths.frontend.display(),
+                    admin_url
+                ),
+            )?;
+            let mut backend = match start_backend(&paths, port) {
+                Ok(backend) => backend,
+                Err(error) => {
+                    let _ = append_log(&desktop_log, &format!("backend spawn failed: {error}"));
+                    return Err(error);
+                }
+            };
+            if let Err(error) = wait_for_admin(port, &mut backend, &desktop_log) {
                 let _ = backend.kill();
                 return Err(error);
             }
@@ -123,6 +157,25 @@ fn start_backend(paths: &RuntimePaths, port: u16) -> Result<Child, Box<dyn std::
     if !paths.frontend.join("admin.html").exists() {
         return Err(format!("未找到管理界面资源：{}", paths.frontend.display()).into());
     }
+    let backend_log = log_path(&paths.config, "desktop-backend.log");
+    if let Some(parent) = backend_log.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let stdout = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&backend_log)?;
+    let stderr = stdout.try_clone()?;
+    append_log(
+        &backend_log,
+        &format!(
+            "spawning backend={} config={} frontend={} admin=127.0.0.1:{}",
+            paths.backend.display(),
+            paths.config.display(),
+            paths.frontend.display(),
+            port
+        ),
+    )?;
     let desktop_executable = std::env::current_exe()?;
     let mut command = Command::new(&paths.backend);
     command
@@ -140,20 +193,34 @@ fn start_backend(paths: &RuntimePaths, port: u16) -> Result<Child, Box<dyn std::
     }
     Ok(command
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
         .spawn()?)
 }
 
-fn wait_for_admin(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+fn wait_for_admin(
+    port: u16,
+    backend: &mut Child,
+    desktop_log: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline {
         if TcpStream::connect(("127.0.0.1", port)).is_ok() {
             return Ok(());
         }
+        if let Some(status) = backend.try_wait()? {
+            let message = format!(
+                "backend exited before management API was ready: {status}; see {} and the backend log next to it",
+                desktop_log.display()
+            );
+            let _ = append_log(desktop_log, &message);
+            return Err(message.into());
+        }
         thread::sleep(Duration::from_millis(100));
     }
-    Err("管理服务启动超时".into())
+    let message = format!("management API startup timed out on 127.0.0.1:{port}");
+    let _ = append_log(desktop_log, &message);
+    Err(format!("管理服务启动超时；详见 {}", desktop_log.display()).into())
 }
 
 fn create_window(app: &mut tauri::App, admin_url: &str) -> Result<(), Box<dyn std::error::Error>> {

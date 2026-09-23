@@ -3,6 +3,7 @@
 use std::{
     collections::HashMap,
     env,
+    fs::{self, OpenOptions},
     io::ErrorKind,
     net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
@@ -69,8 +70,68 @@ use verification::{
 };
 
 const DEFAULT_CONFIG: &str = "config.toml";
+const LOG_DIRECTORY: &str = "logs";
+const LOG_FILE: &str = "bot-gate.log";
+const LOG_ROTATE_BYTES: u64 = 5 * 1024 * 1024;
 pub(crate) const NGINX_SETTINGS_KEY: &str = "nginx_config";
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn startup_log_path(config_path: &Path) -> PathBuf {
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(LOG_DIRECTORY)
+        .join(LOG_FILE)
+}
+
+fn startup_error_message(error: &anyhow::Error, log_path: &Path) -> String {
+    format!("{error:#}\n\n日志文件：{}", log_path.display())
+}
+
+fn init_logging(log_path: &Path) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create log directory {}", parent.display()))?;
+    }
+    rotate_log(log_path)?;
+    let file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .with_context(|| format!("failed to open log file {}", log_path.display()))?;
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .with_ansi(false)
+        .with_writer(file)
+        .try_init()
+        .map_err(|error| anyhow::anyhow!("failed to initialize file logging: {error}"))?;
+    Ok(())
+}
+
+fn rotate_log(log_path: &Path) -> Result<()> {
+    let Ok(metadata) = fs::metadata(log_path) else {
+        return Ok(());
+    };
+    if metadata.len() < LOG_ROTATE_BYTES {
+        return Ok(());
+    }
+    let rotated = log_path.with_extension("log.1");
+    if rotated.exists() {
+        fs::remove_file(&rotated)
+            .with_context(|| format!("failed to remove old log {}", rotated.display()))?;
+    }
+    fs::rename(log_path, &rotated).with_context(|| {
+        format!(
+            "failed to rotate log {} to {}",
+            log_path.display(),
+            rotated.display()
+        )
+    })?;
+    Ok(())
+}
 
 fn should_try_ephemeral_port(error: &std::io::Error, configured_port: u16) -> bool {
     configured_port != 0
@@ -823,21 +884,46 @@ fn frontend_dist_path(config_path: &Path) -> PathBuf {
 
 #[tokio::main]
 async fn main() {
+    let (config_path, _) = startup_options();
+    let log_path = startup_log_path(&config_path);
     if let Err(error) = run().await {
-        report_startup_error(&error);
+        report_startup_error(&error, &log_path);
     }
 }
 
 async fn run() -> Result<()> {
-    tracing_subscriber::fmt().with_env_filter("info").init();
     let (config_path, headless) = startup_options();
+    let log_path = startup_log_path(&config_path);
+    init_logging(&log_path)?;
+    info!(
+        version = APP_VERSION,
+        config = %config_path.display(),
+        headless,
+        log = %log_path.display(),
+        "starting Bot Gate"
+    );
     let config_path = prepare_config_path(config_path)?;
-    let mut config = load_config(&config_path)?;
+    info!(config = %config_path.display(), "loading configuration");
+    let mut config = load_config(&config_path)
+        .with_context(|| format!("failed to load configuration {}", config_path.display()))?;
     if let Ok(listen) = env::var("BOT_GATE_ADMIN_LISTEN") {
+        info!(listen = %listen, "overriding admin listener from environment");
         config.admin.listen = listen;
     }
-    let state = build_state(&config, frontend_dist_path(&config_path))?;
+    let frontend_dist = frontend_dist_path(&config_path);
+    info!(frontend = %frontend_dist.display(), "loading runtime state");
+    let state = build_state(&config, frontend_dist.clone()).with_context(|| {
+        format!(
+            "failed to initialize runtime state from {}",
+            config_path.display()
+        )
+    })?;
     let tls_config = if config.tls.enabled {
+        info!(
+            cert = %config.tls.cert_file,
+            key = %config.tls.key_file,
+            "loading TLS configuration"
+        );
         Some(
             RustlsConfig::from_pem_file(&config.tls.cert_file, &config.tls.key_file)
                 .await
@@ -860,12 +946,21 @@ async fn run() -> Result<()> {
         tls_config.clone(),
         body_limit,
     );
+    info!(
+        listen = %config.server.listen,
+        tls = config.tls.enabled,
+        "starting Bot Gate front proxy"
+    );
     let license = license::status(&state.license);
     if !state.license.enabled || license.status == "active" {
-        gateway
-            .start()
-            .await
-            .context("failed to start the Bot Gate front proxy")?;
+        gateway.start().await.with_context(|| {
+            format!(
+                "failed to start the Bot Gate front proxy on {}; see {}",
+                config.server.listen,
+                log_path.display()
+            )
+        })?;
+        info!(status = ?gateway.status().await, "Bot Gate front proxy started");
     } else {
         warn!(
             status = license.status,
@@ -890,6 +985,7 @@ async fn run() -> Result<()> {
     if let Some(admin_state) = admin_state {
         let (admin_listener, admin_address) = bind_listener(&config.admin.listen, "admin").await?;
         let admin_url = format!("http://{admin_address}");
+        info!(address = %admin_address, "starting Bot Gate management API");
         let (tray_handle, tray_events, tray_enabled) = if headless {
             let (_, events) = mpsc::unbounded_channel();
             (None, events, false)
@@ -1030,13 +1126,22 @@ fn startup_options() -> (PathBuf, bool) {
     (config_path.unwrap_or_else(default_config_path), headless)
 }
 
-fn report_startup_error(error: &anyhow::Error) {
+fn report_startup_error(error: &anyhow::Error, log_path: &Path) {
+    let message = startup_error_message(error, log_path);
+    if let Some(parent) = log_path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
+        use std::io::Write;
+
+        let _ = writeln!(file, "startup failed: {message}");
+    }
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
 
-        let message: Vec<u16> = std::ffi::OsStr::new(&error.to_string())
+        let message: Vec<u16> = std::ffi::OsStr::new(&message)
             .encode_wide()
             .chain(std::iter::once(0))
             .collect();
@@ -1049,7 +1154,7 @@ fn report_startup_error(error: &anyhow::Error) {
         }
     }
     #[cfg(not(target_os = "windows"))]
-    eprintln!("Bot Gate startup failed: {error:#}");
+    eprintln!("Bot Gate startup failed: {message}");
 }
 
 async fn shutdown_signal() {

@@ -167,6 +167,8 @@ The first command should return `302` with a `/__bot_verify/start` location. The
 
 Press `Ctrl-C` to stop Bot Gate. If startup fails, check that the configured ports are free, the upstream is running, `backend/config.toml` is valid, and `frontend/dist/admin.html` and `frontend/dist/challenge.html` are present in the repository. If a browser keeps receiving a challenge, clear the site cookie and verify that the request Host exactly matches a configured `[[sites]]` host.
 
+On Windows desktop, startup diagnostics are written next to the persistent app configuration: `%APPDATA%\com.ggsimida.botgate\logs\desktop.log`, `%APPDATA%\com.ggsimida.botgate\logs\desktop-backend.log`, and `%APPDATA%\com.ggsimida.botgate\logs\bot-gate.log`. The first records desktop launch and admin startup timeout, the second captures backend stdout/stderr, and the third contains timestamped backend startup/runtime logs. If startup fails, send these logs with secrets and private hostnames redacted.
+
 ## Development checks
 
 ```text

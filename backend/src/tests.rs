@@ -250,3 +250,23 @@ fn whitelist_matches_ip_and_cidr() {
         .whitelist_rule("10.0.0.1".parse().unwrap())
         .is_none());
 }
+
+#[test]
+fn startup_log_path_is_next_to_the_config() {
+    let config = std::path::Path::new("/tmp/BotGate/config.toml");
+    assert_eq!(
+        startup_log_path(config),
+        std::path::PathBuf::from("/tmp/BotGate/logs/bot-gate.log")
+    );
+}
+
+#[test]
+fn startup_failure_message_points_to_full_log() {
+    let error = anyhow::anyhow!("failed to bind gateway listener 127.0.0.1:8080");
+    let message = startup_error_message(
+        &error,
+        std::path::Path::new(r"C:\ProgramData\BotGate\logs\bot-gate.log"),
+    );
+    assert!(message.contains("failed to bind gateway listener 127.0.0.1:8080"));
+    assert!(message.contains(r"C:\ProgramData\BotGate\logs\bot-gate.log"));
+}
