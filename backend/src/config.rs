@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use ipnet::IpNet;
-use serde::{de, Deserialize, Deserializer};
+use serde::{de, Deserialize, Deserializer, Serialize};
 use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
@@ -31,7 +31,7 @@ pub(crate) struct Config {
     #[serde(default)]
     pub(crate) tls: TlsConfig,
     #[serde(default)]
-    pub(crate) caddy: CaddyConfig,
+    pub(crate) nginx: NginxConfig,
     #[serde(default)]
     pub(crate) sites: Vec<SiteConfig>,
 }
@@ -63,29 +63,6 @@ impl Default for LicenseConfig {
             enabled: false,
             public_key: String::new(),
             file: default_license_file(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub(crate) struct CaddyConfig {
-    #[serde(default)]
-    pub(crate) enabled: bool,
-    #[serde(default = "default_caddy_admin_api")]
-    pub(crate) admin_api: String,
-    #[serde(default = "default_caddy_server")]
-    pub(crate) server: String,
-    #[serde(default = "default_caddy_gate_upstream")]
-    pub(crate) gate_upstream: String,
-}
-
-impl Default for CaddyConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            admin_api: default_caddy_admin_api(),
-            server: default_caddy_server(),
-            gate_upstream: default_caddy_gate_upstream(),
         }
     }
 }
@@ -129,6 +106,32 @@ impl Default for AdminConfig {
         Self {
             enabled: true,
             listen: default_admin_listen(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct NginxConfig {
+    #[serde(default)]
+    pub(crate) enabled: bool,
+    #[serde(default = "default_nginx_vhost_dir")]
+    pub(crate) vhost_dir: String,
+    #[serde(default = "default_nginx_binary")]
+    pub(crate) binary: String,
+    #[serde(default)]
+    pub(crate) config_file: String,
+    #[serde(default = "default_nginx_include_dir")]
+    pub(crate) include_dir: String,
+}
+
+impl Default for NginxConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            vhost_dir: default_nginx_vhost_dir(),
+            binary: default_nginx_binary(),
+            config_file: String::new(),
+            include_dir: default_nginx_include_dir(),
         }
     }
 }
@@ -336,26 +339,40 @@ impl Default for UpstreamPolicy {
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct SiteConfig {
     pub(crate) host: String,
+    #[serde(default)]
     pub(crate) target: String,
+    #[serde(default = "default_site_mode")]
+    pub(crate) mode: String,
     #[serde(default = "default_policy")]
     pub(crate) policy: String,
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
 }
 
+pub(crate) fn is_valid_site_mode(mode: &str) -> bool {
+    matches!(mode, "proxy" | "nginx")
+}
+
+pub(crate) fn default_nginx_vhost_dir() -> String {
+    // Empty means the adapter discovers the files loaded by `nginx -T`.
+    // Never assume a panel or a platform-specific install layout here.
+    String::new()
+}
+
+pub(crate) fn default_nginx_binary() -> String {
+    "nginx".to_string()
+}
+
+pub(crate) fn default_nginx_include_dir() -> String {
+    // Resolved relative to the Bot Gate config file.
+    "data/nginx".to_string()
+}
+
+pub(crate) fn default_site_mode() -> String {
+    "proxy".to_string()
+}
+
 pub(crate) fn default_listen() -> String {
-    "127.0.0.1:8080".to_string()
-}
-
-pub(crate) fn default_caddy_admin_api() -> String {
-    "http://127.0.0.1:2019".to_string()
-}
-
-pub(crate) fn default_caddy_server() -> String {
-    "srv0".to_string()
-}
-
-pub(crate) fn default_caddy_gate_upstream() -> String {
     "127.0.0.1:8080".to_string()
 }
 
@@ -581,6 +598,9 @@ fn resolve_relative_paths(config: &mut Config, config_path: &Path) {
         &mut config.license.file,
         &mut config.tls.cert_file,
         &mut config.tls.key_file,
+        &mut config.nginx.config_file,
+        &mut config.nginx.vhost_dir,
+        &mut config.nginx.include_dir,
     ] {
         let path = Path::new(value.as_str());
         if !value.is_empty() && path.is_relative() {
@@ -605,6 +625,7 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         bail!("admin.listen must use a loopback address");
     }
     validate_tls(config)?;
+    validate_nginx_config(&config.nginx)?;
     if config.verification.cookie_name.is_empty()
         || config.verification.cookie_name.len() > 64
         || config
@@ -691,8 +712,22 @@ pub(crate) fn validate_config(config: &Config) -> Result<()> {
         if !hosts.insert(host.clone(), ()).is_none() {
             bail!("duplicate site host: {host}");
         }
-        validate_upstream(&site.target, &config.upstream)
-            .with_context(|| format!("invalid upstream for {host}"))?;
+        if !is_valid_site_mode(&site.mode) {
+            bail!("invalid site mode for {host}: {}", site.mode);
+        }
+        if site.mode == "proxy" {
+            validate_upstream(&site.target, &config.upstream)
+                .with_context(|| format!("invalid upstream for {host}"))?;
+        } else if !site.target.trim().is_empty() {
+            bail!("nginx mode must not define an upstream for {host}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_nginx_config(config: &NginxConfig) -> Result<()> {
+    if config.enabled && (config.include_dir.trim().is_empty() || config.binary.trim().is_empty()) {
+        bail!("nginx.include_dir and nginx.binary are required when nginx.enabled = true");
     }
     Ok(())
 }

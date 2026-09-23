@@ -1,5 +1,6 @@
 use std::{
     net::{IpAddr, SocketAddr},
+    path::Path as FsPath,
     sync::Arc,
 };
 
@@ -18,7 +19,10 @@ use crate::*;
 #[derive(Debug, Deserialize)]
 struct AdminSiteInput {
     host: String,
+    #[serde(default)]
     target: String,
+    #[serde(default = "default_site_mode")]
+    mode: String,
     #[serde(default = "default_policy")]
     policy: String,
     #[serde(default = "default_true")]
@@ -66,6 +70,20 @@ struct AdminIdInput {
 #[derive(Debug, Deserialize)]
 struct AdminLicenseInput {
     key: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AdminNginxConfigInput {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    binary: String,
+    #[serde(default)]
+    config_file: String,
+    #[serde(default)]
+    vhost_dir: String,
+    #[serde(default)]
+    include_dir: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -177,6 +195,16 @@ pub(crate) async fn admin_system(
         return response;
     }
     let gateway = state.gateway.status().await;
+    let nginx = match current_nginx_config(&state) {
+        Ok(config) => config,
+        Err(error) => {
+            error!(error = %error, "failed to read Nginx settings");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置不可用"}),
+            );
+        }
+    };
     json_response(
         StatusCode::OK,
         serde_json::json!({
@@ -184,7 +212,8 @@ pub(crate) async fn admin_system(
             "update_enabled": state.public_state.update.enabled,
             "release_url": state.public_state.update.release_url,
             "license": crate::license::status(&state.public_state.license),
-            "gateway": gateway
+            "gateway": gateway,
+            "nginx": nginx
         }),
     )
 }
@@ -309,27 +338,7 @@ pub(crate) async fn admin_gateway_start(
         );
     }
     match state.gateway.start().await {
-        Ok(gateway) => {
-            if state.public_state.caddy.enabled {
-                let mut caddy = state.public_state.caddy.clone();
-                caddy.gate_upstream = gateway.http_listen.clone();
-                if let Ok(sites) = state.storage.managed_sites() {
-                    for site in sites.into_iter().filter(|site| site.enabled) {
-                        if let Err(error) = crate::caddy::set_site_protection(
-                            &caddy,
-                            &site.host,
-                            &site.target,
-                            true,
-                        )
-                        .await
-                        {
-                            error!(error = %error, host = %site.host, "failed to update Caddy route after gateway start");
-                        }
-                    }
-                }
-            }
-            json_response(StatusCode::OK, serde_json::json!({"gateway": gateway}))
-        }
+        Ok(gateway) => json_response(StatusCode::OK, serde_json::json!({"gateway": gateway})),
         Err(error) => {
             error!(error = %error, "failed to start gateway");
             json_response(
@@ -582,16 +591,144 @@ async fn admin_input<T: DeserializeOwned>(
     })
 }
 
-fn managed_site(input: AdminSiteInput, policy: &UpstreamPolicy) -> Result<ManagedSite> {
+fn current_nginx_config(state: &AdminState) -> Result<NginxConfig> {
+    state
+        .nginx
+        .read()
+        .map(|config| config.clone())
+        .map_err(|_| anyhow::anyhow!("Nginx 设置不可用"))
+}
+
+fn clean_nginx_value(name: &str, value: &str) -> Result<String> {
+    let value = value.trim();
+    if value.len() > 2048 || value.contains(['\r', '\n']) {
+        bail!("{name} 过长或包含换行符");
+    }
+    Ok(value.to_string())
+}
+
+fn managed_nginx_config(input: AdminNginxConfigInput, config_path: &FsPath) -> Result<NginxConfig> {
+    let base = config_path.parent().unwrap_or_else(|| FsPath::new("."));
+    let binary = clean_nginx_value("binary", &input.binary)?;
+    let config_file = clean_nginx_value("config_file", &input.config_file)?;
+    let vhost_dir = clean_nginx_value("vhost_dir", &input.vhost_dir)?;
+    let include_dir = clean_nginx_value("include_dir", &input.include_dir)?;
+    let resolve = |value: String| {
+        if value.is_empty() {
+            value
+        } else {
+            let path = FsPath::new(&value);
+            if path.is_relative() {
+                base.join(path).to_string_lossy().into_owned()
+            } else {
+                value
+            }
+        }
+    };
+    let config = NginxConfig {
+        enabled: input.enabled,
+        binary: if binary.is_empty() {
+            default_nginx_binary()
+        } else {
+            binary
+        },
+        config_file: resolve(config_file),
+        vhost_dir: resolve(vhost_dir),
+        include_dir: if include_dir.is_empty() {
+            resolve(default_nginx_include_dir())
+        } else {
+            resolve(include_dir)
+        },
+    };
+    validate_nginx_config(&config)?;
+    Ok(config)
+}
+
+pub(crate) async fn admin_save_nginx(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+    request: Request<Body>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let input: AdminNginxConfigInput = match admin_input(request).await {
+        Ok(input) => input,
+        Err(response) => return *response,
+    };
+    let nginx = match managed_nginx_config(input, &state.config_path) {
+        Ok(config) => config,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"message": error.to_string()}),
+            )
+        }
+    };
+    let serialized = match serde_json::to_string(&nginx) {
+        Ok(value) => value,
+        Err(error) => {
+            error!(error = %error, "failed to serialize Nginx settings");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置保存失败"}),
+            );
+        }
+    };
+    let mut current = match state.nginx.write() {
+        Ok(current) => current,
+        Err(_) => {
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置不可用"}),
+            )
+        }
+    };
+    let previous = current.clone();
+    *current = nginx.clone();
+    if let Err(error) = state.storage.set_setting(NGINX_SETTINGS_KEY, &serialized) {
+        *current = previous;
+        error!(error = %error, "failed to persist Nginx settings");
+        return json_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            serde_json::json!({"message":"Nginx 设置保存失败，请检查 SQLite 存储"}),
+        );
+    }
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"ok":true,"nginx":nginx,"existing_sites_require_resync":true}),
+    )
+}
+
+fn managed_site(
+    input: AdminSiteInput,
+    policy: &UpstreamPolicy,
+    nginx: &NginxConfig,
+) -> Result<ManagedSite> {
     let host = normalize_host(&input.host)?;
-    validate_upstream(&input.target, policy)?;
+    let mode = input.mode.trim().to_ascii_lowercase();
+    if !is_valid_site_mode(&mode) {
+        bail!("mode must be proxy or nginx");
+    }
+    let target = input.target.trim().to_string();
+    if mode == "proxy" {
+        validate_upstream(&target, policy)?;
+    } else {
+        if !nginx.enabled {
+            bail!("Nginx 内联适配未启用；请先配置 [nginx]");
+        }
+        if !target.is_empty() {
+            bail!("Nginx 内联模式不需要源站服务地址");
+        }
+    }
     let policy_name = input.policy.trim();
     if policy_name.is_empty() || policy_name.len() > 64 || policy_name.contains(['\r', '\n']) {
         bail!("policy must be 1-64 characters")
     }
     Ok(ManagedSite {
         host,
-        target: input.target,
+        target,
+        mode,
         policy: policy_name.to_string(),
         enabled: input.enabled,
     })
@@ -638,6 +775,7 @@ fn refresh_managed_runtime(state: &AdminState) -> Result<()> {
                 SiteConfig {
                     host: site.host,
                     target: site.target,
+                    mode: site.mode,
                     policy: site.policy,
                     enabled: site.enabled,
                 },
@@ -669,26 +807,51 @@ pub(crate) async fn admin_list_sites(
     if let Some(response) = admin_access(remote) {
         return response;
     }
+    let gateway_running = state.gateway.status().await.running;
+    let nginx = match current_nginx_config(&state) {
+        Ok(config) => config,
+        Err(error) => {
+            error!(error = %error, "failed to read Nginx settings");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置不可用"}),
+            );
+        }
+    };
     match state.storage.managed_sites() {
         Ok(sites) => {
             let rows = sites
                 .into_iter()
                 .map(|site| {
+                    let inline = site.mode == "nginx";
+                    let nginx_configured = inline && nginx.enabled;
+                    let nginx_protected = nginx_configured
+                        && site.enabled
+                        && gateway_running
+                        && crate::nginx::is_site_protected(&nginx, &site.host).unwrap_or(false);
+                    let effective_protection = if inline {
+                        nginx_protected
+                    } else {
+                        site.enabled && gateway_running
+                    };
                     serde_json::json!({
-                        "id": format!("proxy:{}", site.host),
+                        "id": format!("{}:{}", site.mode, site.host),
                         "host": site.host,
                         "target": site.target,
+                        "mode": site.mode,
                         "policy": site.policy,
                         "enabled": site.enabled,
-                        "source": "proxy",
-                        "supported": true
+                        "gateway_running": gateway_running,
+                        "effective_protection": effective_protection,
+                        "source": if inline { "nginx" } else { "proxy" },
+                        "supported": !inline || nginx.enabled
                     })
                 })
                 .collect::<Vec<_>>();
             json_response(
                 StatusCode::OK,
                 serde_json::json!({
-                    "caddy_enabled": false,
+                    "gateway_running": gateway_running,
                     "sites": rows
                 }),
             )
@@ -715,7 +878,17 @@ pub(crate) async fn admin_save_site(
         Ok(input) => input,
         Err(response) => return *response,
     };
-    let site = match managed_site(input, &state.public_state.upstream_policy) {
+    let nginx = match current_nginx_config(&state) {
+        Ok(config) => config,
+        Err(error) => {
+            error!(error = %error, "failed to read Nginx settings");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置不可用"}),
+            );
+        }
+    };
+    let site = match managed_site(input, &state.public_state.upstream_policy, &nginx) {
         Ok(site) => site,
         Err(error) => {
             return json_response(
@@ -724,6 +897,33 @@ pub(crate) async fn admin_save_site(
             )
         }
     };
+    let previous = state
+        .storage
+        .managed_sites()
+        .ok()
+        .and_then(|sites| sites.into_iter().find(|current| current.host == site.host));
+    if site.mode == "nginx" {
+        if let Err(error) = crate::nginx::sync_site(&nginx, &state.gate_listen, &site) {
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"message":error.to_string()}),
+            );
+        }
+    } else if previous
+        .as_ref()
+        .is_some_and(|current| current.mode == "nginx")
+    {
+        if let Err(error) = crate::nginx::remove_site(
+            &nginx,
+            &state.gate_listen,
+            previous.as_ref().expect("checked"),
+        ) {
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"message":error.to_string()}),
+            );
+        }
+    }
     if let Err(error) = state
         .storage
         .upsert_site(&site)
@@ -735,7 +935,10 @@ pub(crate) async fn admin_save_site(
             serde_json::json!({"message":"failed to save site"}),
         );
     }
-    json_response(StatusCode::OK, serde_json::json!({"ok":true}))
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"ok":true,"mode":site.mode}),
+    )
 }
 
 pub(crate) async fn admin_toggle_site(
@@ -750,6 +953,25 @@ pub(crate) async fn admin_toggle_site(
         Ok(input) => input,
         Err(response) => return *response,
     };
+    let nginx = match current_nginx_config(&state) {
+        Ok(config) => config,
+        Err(error) => {
+            error!(error = %error, "failed to read Nginx settings");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置不可用"}),
+            );
+        }
+    };
+    let host = match normalize_host(&input.host) {
+        Ok(host) => host,
+        Err(error) => {
+            return json_response(
+                StatusCode::BAD_REQUEST,
+                serde_json::json!({"message": error.to_string()}),
+            )
+        }
+    };
     let mut sites = match state.storage.managed_sites() {
         Ok(sites) => sites,
         Err(error) => {
@@ -760,7 +982,7 @@ pub(crate) async fn admin_toggle_site(
             );
         }
     };
-    let Some(site) = sites.iter_mut().find(|site| site.host == input.host) else {
+    let Some(site) = sites.iter_mut().find(|site| site.host == host) else {
         return json_response(
             StatusCode::NOT_FOUND,
             serde_json::json!({"message":"site not found"}),
@@ -771,6 +993,14 @@ pub(crate) async fn admin_toggle_site(
     }
     site.enabled = input.enabled;
     let updated = site.clone();
+    if updated.mode == "nginx" {
+        if let Err(error) = crate::nginx::sync_site(&nginx, &state.gate_listen, &updated) {
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"message":error.to_string()}),
+            );
+        }
+    }
     if let Err(error) = state
         .storage
         .upsert_site(&updated)
@@ -779,7 +1009,7 @@ pub(crate) async fn admin_toggle_site(
         error!(error = %error, host = %updated.host, "failed to persist site toggle");
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
-            serde_json::json!({"message":"站点状态保存失败，Caddy 路由已切换，请重试"}),
+            serde_json::json!({"message":"站点状态保存失败，请重试"}),
         );
     }
     json_response(
@@ -800,6 +1030,16 @@ pub(crate) async fn admin_delete_site(
         Ok(input) => input,
         Err(response) => return *response,
     };
+    let nginx = match current_nginx_config(&state) {
+        Ok(config) => config,
+        Err(error) => {
+            error!(error = %error, "failed to read Nginx settings");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置不可用"}),
+            );
+        }
+    };
     let host = match normalize_host(&input.host) {
         Ok(host) => host,
         Err(error) => {
@@ -809,6 +1049,19 @@ pub(crate) async fn admin_delete_site(
             )
         }
     };
+    let existing = state
+        .storage
+        .managed_sites()
+        .ok()
+        .and_then(|sites| sites.into_iter().find(|site| site.host == host));
+    if let Some(site) = existing.as_ref().filter(|site| site.mode == "nginx") {
+        if let Err(error) = crate::nginx::remove_site(&nginx, &state.gate_listen, site) {
+            return json_response(
+                StatusCode::BAD_GATEWAY,
+                serde_json::json!({"message":error.to_string()}),
+            );
+        }
+    }
     match state
         .storage
         .delete_site(&host)
@@ -1072,6 +1325,7 @@ pub(crate) async fn admin_reload_config(
             Ok(ManagedSite {
                 host: normalize_host(&site.host)?,
                 target: site.target.clone(),
+                mode: site.mode.clone(),
                 policy: site.policy.clone(),
                 enabled: site.enabled,
             })
@@ -1117,7 +1371,7 @@ pub(crate) async fn admin_reload_config(
         .collect::<Vec<_>>();
     if let Err(error) = state
         .storage
-        .replace_management(&sites, &whitelist)
+        .merge_management(&sites, &whitelist)
         .and_then(|_| refresh_managed_runtime(&state))
     {
         error!(error = %error, "config reload failed");

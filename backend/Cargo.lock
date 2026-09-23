@@ -176,16 +176,14 @@ dependencies = [
 
 [[package]]
 name = "bot-gate"
-version = "0.2.39"
+version = "0.2.40"
 dependencies = [
  "anyhow",
  "axum",
  "axum-server",
  "base64",
- "bytes",
  "ed25519-dalek",
  "hmac",
- "http-body-util",
  "hyper",
  "hyper-util",
  "ipnet",

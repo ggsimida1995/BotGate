@@ -187,7 +187,7 @@ fn create_redirect_state(
 ) -> Option<String> {
     let now = unix_now();
     let token = random_token(24);
-    let verify_path = format!("/{}", random_token(24));
+    let verify_path = format!("/_bot_gate/{}", random_token(24));
     let mut redirects = verification.redirects.lock().ok()?;
     redirects.retain(|_, redirect| {
         redirect
@@ -288,6 +288,15 @@ pub(crate) fn verification_redirect(
             .map(ToString::to_string)
             .as_deref(),
     );
+    verification_redirect_for_path(state, remote_ip, site, return_path)
+}
+
+pub(crate) fn verification_redirect_for_path(
+    state: &AppState,
+    remote_ip: IpAddr,
+    site: &str,
+    return_path: String,
+) -> Response<Body> {
     redirect_response(state, remote_ip, site, return_path)
 }
 

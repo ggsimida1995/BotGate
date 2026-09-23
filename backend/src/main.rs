@@ -11,11 +11,12 @@ use std::{
 };
 
 mod admin;
-mod caddy;
 mod config;
 mod gateway;
 mod http;
 mod license;
+mod nginx;
+mod nginx_bridge;
 mod proxy;
 mod security;
 mod storage;
@@ -31,8 +32,8 @@ use admin::{
     admin_gateway_status, admin_gateway_stop, admin_interception_detail, admin_list_bans,
     admin_list_challenges, admin_list_interceptions, admin_list_requests, admin_list_sites,
     admin_list_whitelist, admin_page, admin_reload_config, admin_request_detail, admin_save_ban,
-    admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site, admin_update_apply,
-    admin_update_check, admin_update_progress,
+    admin_save_nginx, admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site,
+    admin_update_apply, admin_update_check, admin_update_progress,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -68,6 +69,7 @@ use verification::{
 };
 
 const DEFAULT_CONFIG: &str = "config.toml";
+pub(crate) const NGINX_SETTINGS_KEY: &str = "nginx_config";
 pub(crate) const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 fn should_try_ephemeral_port(error: &std::io::Error, configured_port: u16) -> bool {
@@ -193,7 +195,6 @@ pub(crate) struct AppState {
     security: Arc<SecurityState>,
     storage: Arc<Storage>,
     upstream_policy: UpstreamPolicy,
-    caddy: CaddyConfig,
     update: UpdateConfig,
     license: LicenseConfig,
     https_redirect_port: Option<u16>,
@@ -209,6 +210,8 @@ struct AdminState {
     tls_config: Option<RustlsConfig>,
     gateway: Arc<GatewayController>,
     update_progress: updater::UpdateProgressState,
+    nginx: Arc<RwLock<NginxConfig>>,
+    gate_listen: String,
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -216,6 +219,23 @@ pub(crate) fn unix_now() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+pub(crate) fn effective_remote(remote: SocketAddr, request: &Request<Body>) -> SocketAddr {
+    if !remote.ip().is_loopback() {
+        return remote;
+    }
+    let Some(value) = request
+        .headers()
+        .get("x-real-ip")
+        .and_then(|value| value.to_str().ok())
+    else {
+        return remote;
+    };
+    value
+        .parse::<IpAddr>()
+        .map(|ip| SocketAddr::new(ip, remote.port()))
+        .unwrap_or(remote)
 }
 
 fn note_challenge_failure(state: &AppState, ip: IpAddr, site: &str) {
@@ -281,6 +301,7 @@ pub(crate) async fn handle_request(
     request: Request<Body>,
 ) -> Response<Body> {
     let started = Instant::now();
+    let remote = effective_remote(remote, &request);
     let request_scheme = scheme.map_or("http", |scheme| scheme.0 .0);
     if header_bytes(&request) > state.max_header_bytes {
         return response_with(
@@ -558,6 +579,14 @@ pub(crate) async fn handle_request(
         }
     }
 
+    if site.mode == "nginx" {
+        return response_with(
+            StatusCode::CONFLICT,
+            "text/plain; charset=utf-8",
+            "nginx inline site must be reached through Nginx",
+        );
+    }
+
     tracing::trace!(site = %site.host, policy = %site.policy, "proxying request");
 
     match proxy_request(&state, request, &site, remote, request_scheme).await {
@@ -614,6 +643,19 @@ pub(crate) async fn handle_request(
     }
 }
 
+fn effective_nginx_config(storage: &Storage, fallback: &NginxConfig) -> Result<NginxConfig> {
+    if !storage.management_enabled() {
+        return Ok(fallback.clone());
+    }
+    let Some(raw) = storage.get_setting(NGINX_SETTINGS_KEY)? else {
+        return Ok(fallback.clone());
+    };
+    let persisted: NginxConfig =
+        serde_json::from_str(&raw).context("failed to parse persisted Nginx settings")?;
+    validate_nginx_config(&persisted)?;
+    Ok(persisted)
+}
+
 fn build_state(config: &Config, frontend_dist: PathBuf) -> Result<Arc<AppState>> {
     let client = Client::builder(TokioExecutor::new()).build_http();
     let secret = verification::load_or_create_secret(Path::new(&config.verification.secret_file))?;
@@ -626,6 +668,7 @@ fn build_state(config: &Config, frontend_dist: PathBuf) -> Result<Arc<AppState>>
             Ok(ManagedSite {
                 host: normalize_host(&site.host)?,
                 target: site.target.clone(),
+                mode: site.mode.clone(),
                 policy: site.policy.clone(),
                 enabled: site.enabled,
             })
@@ -673,6 +716,7 @@ fn build_state(config: &Config, frontend_dist: PathBuf) -> Result<Arc<AppState>>
             SiteConfig {
                 host: site.host,
                 target: site.target,
+                mode: site.mode,
                 policy: site.policy,
                 enabled: site.enabled,
             },
@@ -723,7 +767,6 @@ fn build_state(config: &Config, frontend_dist: PathBuf) -> Result<Arc<AppState>>
         }),
         storage,
         upstream_policy: config.upstream.clone(),
-        caddy: config.caddy.clone(),
         update,
         license: config.license.clone(),
         https_redirect_port: if config.tls.enabled && config.tls.redirect_http {
@@ -817,6 +860,19 @@ async fn run() -> Result<()> {
         tls_config.clone(),
         body_limit,
     );
+    let license = license::status(&state.license);
+    if !state.license.enabled || license.status == "active" {
+        gateway
+            .start()
+            .await
+            .context("failed to start the Bot Gate front proxy")?;
+    } else {
+        warn!(
+            status = license.status,
+            "Bot Gate front proxy is waiting for a valid license"
+        );
+    }
+    let nginx_config = effective_nginx_config(&state.storage, &config.nginx)?;
     let admin_state = if config.admin.enabled {
         Some(Arc::new(AdminState {
             storage: state.storage.clone(),
@@ -825,6 +881,8 @@ async fn run() -> Result<()> {
             tls_config: tls_config.clone(),
             gateway: gateway.clone(),
             update_progress: Arc::new(Mutex::new(updater::UpdateProgress::default())),
+            nginx: Arc::new(RwLock::new(nginx_config)),
+            gate_listen: config.server.listen.clone(),
         }))
     } else {
         None
@@ -853,6 +911,7 @@ async fn run() -> Result<()> {
             )
             .route("/api/dashboard", get(admin_dashboard))
             .route("/api/system", get(admin_system))
+            .route("/api/nginx/config", post(admin_save_nginx))
             .route("/api/update/check", get(admin_update_check))
             .route("/api/update/apply", post(admin_update_apply))
             .route("/api/update/progress", get(admin_update_progress))

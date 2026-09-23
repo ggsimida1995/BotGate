@@ -154,6 +154,7 @@ pub struct BanRecord {
 pub struct ManagedSite {
     pub host: String,
     pub target: String,
+    pub mode: String,
     pub policy: String,
     pub enabled: bool,
 }
@@ -471,6 +472,25 @@ impl Storage {
         self.database.is_some()
     }
 
+    pub fn get_setting(&self, key: &str) -> Result<Option<String>> {
+        Ok(self
+            .management_connection()?
+            .query_row(
+                "SELECT value FROM settings WHERE key = ?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn set_setting(&self, key: &str, value: &str) -> Result<()> {
+        self.management_connection()?.execute(
+            "INSERT INTO settings (key, value, updated_at) VALUES (?1, ?2, ?3) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            params![key, value, unix_now() as i64],
+        )?;
+        Ok(())
+    }
+
     pub fn bootstrap_management(
         &self,
         sites: &[ManagedSite],
@@ -488,8 +508,8 @@ impl Storage {
         let now = unix_now() as i64;
         for site in sites {
             transaction.execute(
-                "INSERT OR IGNORE INTO sites (host, target, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![site.host, site.target, site.policy, site.enabled, now],
+                "INSERT OR IGNORE INTO sites (host, target, mode, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![site.host, site.target, site.mode, site.policy, site.enabled, now],
             )?;
         }
         if initialized.is_none() {
@@ -508,27 +528,36 @@ impl Storage {
         Ok(())
     }
 
-    pub fn replace_management(
+    /// Merge declarative config entries into the persistent management store.
+    ///
+    /// The SQLite records are authoritative after the first run. Reloading
+    /// config must never delete sites that were added from the desktop UI.
+    pub fn merge_management(
         &self,
         sites: &[ManagedSite],
         whitelist: &[ManagedWhitelist],
     ) -> Result<()> {
         let mut connection = self.management_connection()?;
         let transaction = connection.transaction()?;
-        transaction.execute("DELETE FROM sites", [])?;
-        transaction.execute("DELETE FROM whitelist", [])?;
         let now = unix_now() as i64;
         for site in sites {
             transaction.execute(
-                "INSERT INTO sites (host, target, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
-                params![site.host, site.target, site.policy, site.enabled, now],
+                "INSERT OR IGNORE INTO sites (host, target, mode, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![site.host, site.target, site.mode, site.policy, site.enabled, now],
             )?;
         }
         for entry in whitelist {
-            transaction.execute(
-                "INSERT INTO whitelist (kind, value, skip_challenge, skip_rate_limit, note, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![entry.kind, entry.value, entry.skip_challenge, entry.skip_rate_limit, entry.note, now],
+            let exists: bool = transaction.query_row(
+                "SELECT EXISTS(SELECT 1 FROM whitelist WHERE kind = ?1 AND value = ?2)",
+                params![entry.kind, entry.value],
+                |row| row.get(0),
             )?;
+            if !exists {
+                transaction.execute(
+                    "INSERT INTO whitelist (kind, value, skip_challenge, skip_rate_limit, note, created_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![entry.kind, entry.value, entry.skip_challenge, entry.skip_rate_limit, entry.note, now],
+                )?;
+            }
         }
         transaction.commit()?;
         Ok(())
@@ -536,15 +565,16 @@ impl Storage {
 
     pub fn managed_sites(&self) -> Result<Vec<ManagedSite>> {
         let connection = self.management_connection()?;
-        let mut statement =
-            connection.prepare("SELECT host, target, policy, enabled FROM sites ORDER BY host")?;
+        let mut statement = connection
+            .prepare("SELECT host, target, mode, policy, enabled FROM sites ORDER BY host")?;
         let sites = statement
             .query_map([], |row| {
                 Ok(ManagedSite {
                     host: row.get(0)?,
                     target: row.get(1)?,
-                    policy: row.get(2)?,
-                    enabled: row.get(3)?,
+                    mode: row.get(2)?,
+                    policy: row.get(3)?,
+                    enabled: row.get(4)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()
@@ -555,8 +585,8 @@ impl Storage {
     pub fn upsert_site(&self, site: &ManagedSite) -> Result<()> {
         let connection = self.management_connection()?;
         connection.execute(
-            "INSERT INTO sites (host, target, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?5) ON CONFLICT(host) DO UPDATE SET target = excluded.target, policy = excluded.policy, enabled = excluded.enabled, updated_at = excluded.updated_at",
-            params![site.host, site.target, site.policy, site.enabled, unix_now() as i64],
+            "INSERT INTO sites (host, target, mode, policy, enabled, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) ON CONFLICT(host) DO UPDATE SET target = excluded.target, mode = excluded.mode, policy = excluded.policy, enabled = excluded.enabled, updated_at = excluded.updated_at",
+            params![site.host, site.target, site.mode, site.policy, site.enabled, unix_now() as i64],
         )?;
         Ok(())
     }
@@ -801,6 +831,18 @@ fn initialize(connection: &Connection) -> Result<()> {
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.execute_batch(include_str!("../migrations/001_initial.sql"))?;
+    let has_mode = connection
+        .prepare("PRAGMA table_info(sites)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .iter()
+        .any(|name| name == "mode");
+    if !has_mode {
+        connection.execute(
+            "ALTER TABLE sites ADD COLUMN mode TEXT NOT NULL DEFAULT 'proxy'",
+            [],
+        )?;
+    }
     Ok(())
 }
 
@@ -1038,6 +1080,31 @@ mod tests {
     }
 
     #[test]
+    fn migrates_legacy_sites_to_proxy_mode() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE sites (id INTEGER PRIMARY KEY, host TEXT NOT NULL UNIQUE, target TEXT NOT NULL, policy TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO sites (host, target, policy, enabled, created_at, updated_at) VALUES ('legacy.test', 'http://127.0.0.1:9000', 'normal', 1, 1, 1)",
+                [],
+            )
+            .unwrap();
+        initialize(&connection).unwrap();
+        let mode: String = connection
+            .query_row(
+                "SELECT mode FROM sites WHERE host = 'legacy.test'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(mode, "proxy");
+    }
+
+    #[test]
     fn management_records_round_trip() {
         let path = std::env::temp_dir().join(format!("bot-gate-storage-{}.db", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -1053,16 +1120,23 @@ mod tests {
         let site = ManagedSite {
             host: "project-a.test".to_string(),
             target: "http://127.0.0.1:9001".to_string(),
+            mode: "proxy".to_string(),
             policy: "normal".to_string(),
             enabled: true,
         };
         storage.bootstrap_management(&[site.clone()], &[]).unwrap();
+        storage.set_setting("test.setting", "persisted").unwrap();
+        assert_eq!(
+            storage.get_setting("test.setting").unwrap().as_deref(),
+            Some("persisted")
+        );
         assert_eq!(storage.managed_sites().unwrap().len(), 1);
         storage
             .bootstrap_management(
                 &[ManagedSite {
                     host: "project-b.test".to_string(),
                     target: "http://127.0.0.1:9002".to_string(),
+                    mode: "proxy".to_string(),
                     policy: "normal".to_string(),
                     enabled: true,
                 }],
@@ -1088,6 +1162,21 @@ mod tests {
         storage.replace_whitelist(&entry).unwrap();
         let entry = storage.managed_whitelist().unwrap().pop().unwrap();
         assert!(storage.delete_whitelist(entry.id).unwrap());
+
+        storage
+            .merge_management(
+                &[ManagedSite {
+                    host: "project-c.test".to_string(),
+                    target: "http://127.0.0.1:9003".to_string(),
+                    mode: "proxy".to_string(),
+                    policy: "normal".to_string(),
+                    enabled: true,
+                }],
+                &[],
+            )
+            .unwrap();
+        assert_eq!(storage.managed_sites().unwrap().len(), 3);
+        assert!(!storage.managed_sites().unwrap()[0].enabled);
         let _ = std::fs::remove_file(path);
     }
 

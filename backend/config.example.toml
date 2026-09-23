@@ -3,10 +3,10 @@
 # Set [admin] below to enable the loopback-only management UI.
 
 [server]
-# The gateway listener is started manually from the management dashboard.
-# If this port is occupied, Bot Gate automatically selects a free port.
+# The Bot Gate front proxy starts automatically with the process.
+# If this port is occupied, Bot Gate fails instead of silently moving the public entry point.
 # For production front-proxy mode, use a public listener such as
-# 0.0.0.0:18081, and bind Nginx only to an internal source port.
+# 0.0.0.0:18081, and bind the source service only to an internal port.
 listen = "127.0.0.1:8080"
 request_timeout_secs = 30
 max_header_bytes = 65536
@@ -63,8 +63,7 @@ database = "data/bot-gate.db"
 log_retention = "7d"
 persist_request_logs = true
 
-# This listener starts with the process and remains available while the gateway is stopped.
-# If this port is occupied, Bot Gate automatically selects a free loopback port.
+# This listener starts with the process and remains available while the front proxy is stopped.
 # Keep it on a loopback address.
 [admin]
 enabled = true
@@ -82,14 +81,20 @@ enabled = false
 public_key = ""
 file = "data/license.key"
 
-[caddy]
-# Enable this when Caddy owns the public domain and should switch its route
-# between Bot Gate and the configured upstream from the admin UI.
-# Leave disabled when Nginx (or another reverse proxy) is in front.
-enabled = false
-admin_api = "http://127.0.0.1:2019"
-server = "srv0"
-gate_upstream = "127.0.0.1:8080"
+# Nginx inline adapter. Paths are environment-specific and must not be hardcoded
+# in the app bundle. When vhost_dir is empty, Bot Gate runs `nginx -T` and
+# discovers the files that the active Nginx actually loaded.
+# binary = "nginx" uses PATH; set an absolute path only when Nginx is not in PATH.
+# config_file = "" uses Nginx's compiled/default config; set it for `nginx -c`.
+# include_dir is resolved relative to this config file.
+[nginx]
+# The adapter is safe to enable without changing Nginx; it only writes a vhost
+# after an nginx-mode site is explicitly saved from the dashboard.
+enabled = true
+vhost_dir = ""
+config_file = ""
+binary = "nginx"
+include_dir = "data/nginx"
 
 [upstream]
 # Local/private upstreams are allowed by default for self-hosted projects.
@@ -100,11 +105,17 @@ allow_private_networks = true
 # to an allowed loopback/private address.
 allow_dns = true
 
-# Optional initial front-proxy routes. `host` is the public hostname/IP sent
-# to Bot Gate; `target` is Nginx's internal HTTP listener. Bot Gate never
-# changes or reloads Nginx configuration.
+# Optional initial routes. Proxy mode routes through Bot Gate to an internal HTTP source.
+# Nginx mode leaves the source vhost in place and injects an inline auth include automatically.
 # [[sites]]
-# host = "172.22.31.39"
-# target = "http://127.0.0.1:18082"
+# host = "example.com"
+# mode = "nginx"
+# policy = "normal"
+# enabled = true
+#
+# [[sites]]
+# host = "dev.example.com"
+# mode = "proxy"
+# target = "http://127.0.0.1:3000"
 # policy = "normal"
 # enabled = true

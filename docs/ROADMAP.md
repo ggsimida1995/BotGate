@@ -34,4 +34,4 @@ GitHub Actions builds Windows x64, Linux x64 and macOS arm64 archives with SHA-2
 
 ## Deferred by design
 
-No Docker, Node.js, Python, Java, Nginx, external CAPTCHA, cloud dependency, Redis, PostgreSQL, complex RBAC or plugin system.
+No Docker, external CAPTCHA, cloud dependency, Redis, PostgreSQL, complex RBAC or plugin system. Bot Gate accepts any internal HTTP source server; it does not manage the source server configuration.

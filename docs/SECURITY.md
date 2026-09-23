@@ -20,6 +20,7 @@ Bot Gate is designed to block simple local-network scanners and reduce accidenta
 - A stolen cookie can be replayed until it expires.
 - A compromised local process can access local files and loopback services.
 - Bot Gate does not fix vulnerabilities in the protected application.
+- The configured source web server must not expose its source port to untrusted clients, or they can bypass Bot Gate entirely.
 
 ## SSRF policy
 

@@ -20,7 +20,7 @@ cargo run --release
 
 Windows 和 macOS 使用 Tauri 2 桌面客户端。开发时先构建后端和前端，再运行 `cargo tauri dev --manifest-path desktop/Cargo.toml`；客户端会隐藏后端控制台，自动打开管理窗口，并在系统托盘或菜单栏驻留。发布包由 GitHub Actions 准备 `desktop/resources/` 后执行 `cargo tauri build` 生成。
 
-启动后默认尝试监听管理端口 `127.0.0.1:9090`，不会立即占用网关端口 `127.0.0.1:8080`。如果端口被占用，程序会自动选择空闲端口，并在管理台的系统状态中显示实际地址。打开管理台后，点击“启动网关”才会启动反向代理；许可证启用时必须先激活有效许可证。点击“停止网关”会释放网关端口，管理台仍保持可用。
+启动后会自动监听 `[server].listen` 作为 Bot Gate 前置代理；如果该端口已被占用，程序会直接启动失败，避免自动换到随机端口导致公网请求绕过保护。管理端口默认是 `127.0.0.1:9090`，管理台仍可手动停止或重新启动前置网关；许可证启用时必须先激活有效许可证。
 
 首次创建配置时，在 `backend/` 目录执行 `cp config.example.toml config.toml`；Windows PowerShell 使用 `Copy-Item config.example.toml config.toml`。
 
@@ -57,7 +57,7 @@ Add the configured hosts to the local hosts file:
 
 The hosts file is `/etc/hosts` on macOS/Linux and `C:\Windows\System32\drivers\etc\hosts` on Windows. `.test` is recommended for local development.
 
-先在管理台启动网关，然后打开 `http://project-a.test:8080`。Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream. 网关停止时，8080 端口不监听，访问会失败；这是为了确保请求不会绕过验证直接到达上游。
+Bot Gate 启动后会自动打开前置网关，然后打开 `http://project-a.test:8080`。Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream. 网关停止时，前置端口不监听，访问会失败；这是为了确保请求不会绕过验证直接到达上游。
 
 ## Configure a site
 
@@ -71,21 +71,29 @@ policy = "normal"
 enabled = true
 ```
 
-`enabled = true` means Browser Challenge protection is active. In production, Bot Gate is the public frontend reverse proxy and `target` is the internal Nginx source address.
+`enabled = true` means Browser Challenge protection is active. In production, Bot Gate is the public frontend reverse proxy and `target` is the internal HTTP source address. The source can be a Vite dev server, Nginx, Node server, or another HTTP web service.
 
 Keep `verification.enabled = true` to require the Browser Challenge. `verification.cookie_ttl` controls the signed-cookie lifetime; `verification.challenge_ttl` controls how long a pending challenge is valid. Keep `verification.secret_file` on local storage and do not delete it while the service is running, or all existing cookies become invalid.
 
 The default upstream policy accepts local loopback/private targets and local DNS names. DNS targets are resolved on every request and are still accepted only when they resolve to a loopback, private, or link-local address; public addresses are rejected. Set either option to `false` when a stricter deployment policy is required.
 
-## Nginx as an internal source
+## Any web server as an internal source
 
-Bot Gate is the **only public entry point**. Nginx remains the source server for HTML, static files, API and WebSocket traffic; Bot Gate never modifies or reloads Nginx configuration.
+Bot Gate is the **only public entry point**. The source service can be Vite during development, or a production server such as Nginx/Node serving the built files and forwarding API/WebSocket traffic. Bot Gate only proxies HTTP; it does not require or modify a specific web server.
 
 ```text
-Browser → Bot Gate public listener → Nginx internal listener → application
+Browser → Bot Gate public listener → internal web source → application/API
 ```
 
-For example, expose Bot Gate on `0.0.0.0:18081` and bind Nginx only to `127.0.0.1:18082`:
+For local development, the source can be Vite:
+
+```text
+npm run dev -- --host 127.0.0.1 --port 3000
+```
+
+For production, the source can be Nginx (or another HTTP server) serving `dist/`. Keep that source listener internal so it cannot bypass Bot Gate.
+
+For example, expose Bot Gate on `0.0.0.0:18081` and bind the production source only to `127.0.0.1:18082`:
 
 ```nginx
 server {
@@ -96,7 +104,7 @@ server {
 }
 ```
 
-Then add this route in **前置代理站点**:
+Then add this route in **前置代理站点** (the same form works for Vite or another HTTP server):
 
 ```toml
 [[sites]]
@@ -106,7 +114,7 @@ policy = "normal"
 enabled = true
 ```
 
-Set `[server].listen` to the public Bot Gate listener, for example `0.0.0.0:18081`, restart Bot Gate, start the gateway, and access `http://172.22.31.39:18081/`. Do not leave Nginx listening on a public address or its original public port: that path bypasses Browser Challenge.
+Set `[server].listen` to the public Bot Gate listener, for example `0.0.0.0:18081`, restart Bot Gate, and access `http://172.22.31.39:18081/`. Bot Gate starts this front proxy automatically. Do not leave the source service listening on a public address or its original public port: that path bypasses Browser Challenge.
 
 ## Management dashboard
 
@@ -133,7 +141,9 @@ POST     /api/gateway/start
 POST     /api/gateway/stop
 ```
 
-Changes made in the dashboard are applied immediately. Bot Gate does not watch `config.toml` for file changes: after adding or editing `[[sites]]` by hand, click **Reload config** in the dashboard or call `POST /api/reload`. This replaces the managed site/whitelist list from the file and refreshes runtime routing. A restart also applies the file. Listener, verification, security, storage, admin, update and license settings require a process restart. The SQLite database is stored at `storage.database` (default: `data/bot-gate.db`).
+Changes made in the dashboard are applied immediately and persisted in SQLite. Bot Gate does not watch `config.toml` for file changes: after adding or editing `[[sites]]` by hand, click **Reload config** in the dashboard or call `POST /api/reload`. Reload merges missing declarative entries and never deletes sites or whitelist records created in the dashboard. A restart also loads the SQLite-managed records. Listener, verification, security, storage, admin, update and license settings require a process restart. The SQLite database is stored at `storage.database` (default: `data/bot-gate.db`).
+
+For Nginx inline mode, do not copy a panel or ServBay path into the app bundle. Use the portable defaults in `backend/config.example.toml`: `binary = "nginx"` resolves through `PATH`, `config_file = ""` uses Nginx's default configuration, and an empty `vhost_dir` makes Bot Gate discover the active files with `nginx -T`. `include_dir` is relative to the Bot Gate config (default `data/nginx`). If Nginx is not in `PATH` or uses a non-default config, set `binary` and/or `config_file` once for that machine; you do not need to configure them again for each site. The process must have permission to read and update the loaded vhost and reload Nginx.
 
 `/api/requests` returns paginated request records and accepts `page`, `page_size`, `host`, `ip`, `path`, `status`, `blocked`, `verified`, `from` and `to` filters. `/api/interceptions` returns paginated security events and accepts `page`, `page_size`, `host`, `ip`, `path`, `event_type`, `from` and `to` filters. `/api/challenges` returns the currently active in-memory challenges without exposing nonces or signatures. The dashboard opens these records from the summary cards; cookies, authorization headers and request bodies are never stored.
 
@@ -142,7 +152,7 @@ When licensing is enabled, an unlicensed or expired public request receives `402
 
 ### Pause protection
 
-Pausing a route stops Browser Challenge for that route, but does not alter Nginx. Keep the Nginx source listener internal; exposing it publicly is always a bypass.
+Pausing a route stops Browser Challenge for that route, but does not alter the source service. Keep the source listener internal; exposing it publicly is always a bypass.
 
 ## Verify the gate with curl
 

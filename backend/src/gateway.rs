@@ -1,14 +1,17 @@
 use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
-use axum::{extract::Extension, Router};
+use axum::{extract::Extension, routing::get, Router};
 use axum_server::{tls_rustls::RustlsConfig, Handle as TlsHandle};
 use serde::Serialize;
-use tokio::sync::{oneshot, Mutex};
+use tokio::{
+    net::TcpListener,
+    sync::{oneshot, Mutex},
+};
 use tower_http::{limit::RequestBodyLimitLayer, services::ServeDir};
 use tracing::error;
 
-use crate::{bind_listener, handle_request, AppState, RequestScheme};
+use crate::{handle_request, nginx_bridge, AppState, RequestScheme};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GatewayStatus {
@@ -89,7 +92,14 @@ impl GatewayController {
             });
         }
 
-        let (listener, http_address) = bind_listener(&self.http_listen, "gateway").await?;
+        let configured: SocketAddr = self
+            .http_listen
+            .parse()
+            .with_context(|| format!("invalid gateway listener address: {}", self.http_listen))?;
+        let listener = TcpListener::bind(configured)
+            .await
+            .with_context(|| format!("failed to bind gateway listener {configured}"))?;
+        let http_address = listener.local_addr()?;
         let app = public_app(self.state.clone(), self.body_limit, "http");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -162,6 +172,18 @@ impl GatewayController {
 
 fn public_app(state: Arc<AppState>, body_limit: usize, scheme: &'static str) -> Router {
     Router::new()
+        .route(
+            "/_bot_gate/check",
+            get(nginx_bridge::check).post(nginx_bridge::check),
+        )
+        .route(
+            "/_bot_gate/challenge",
+            get(nginx_bridge::challenge).post(nginx_bridge::challenge),
+        )
+        .route(
+            "/_bot_gate/deny",
+            get(nginx_bridge::deny_page).post(nginx_bridge::deny_page),
+        )
         .nest_service(
             "/_bot_gate/assets",
             ServeDir::new(state.frontend_dist.join("assets")),

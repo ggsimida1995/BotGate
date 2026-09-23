@@ -2,17 +2,17 @@
 
 ## Scope
 
-Bot Gate is a local reverse proxy with a Rust backend and a separately built React frontend. It sits in front of one or more local HTTP applications and progressively adds browser verification, request policy enforcement, persistence and a loopback-only management plane. The release process produces one Rust executable plus the `frontend/dist` assets it serves. Backend source, configuration, database and build output live under `backend/`.
+Bot Gate is a front reverse proxy with a Rust backend and a separately built React frontend. It is the public entry point, while any internal HTTP web server (Vite, Nginx, Node, or another source service) serves HTML, static files, APIs and WebSockets. Bot Gate adds browser verification, request policy enforcement, persistence and a loopback-only management plane. The release process produces one Rust executable plus the `frontend/dist` assets it serves.
 
 ## Runtime flow
 
 ```text
-Public HTTP/TLS listener
+Public HTTP/TLS listener (Bot Gate)
   -> request limits and Host validation
   -> ban / whitelist decision
   -> rate limit and scanner risk rejection
   -> signed-cookie verification / Browser Challenge
-  -> reverse proxy
+  -> reverse proxy to internal HTTP source
   -> asynchronous request/security logging
 ```
 
@@ -25,6 +25,7 @@ The admin listener is separate and defaults to `127.0.0.1:9090`. Process startup
 - The public listener treats LAN clients as untrusted.
 - The client-provided User-Agent, Referer, Origin and forwarded headers are untrusted.
 - The upstream target is configuration data, never request data.
+- Source web-server listeners must be loopback/internal-only; exposing them publicly bypasses Bot Gate.
 - The admin listener is a local trust boundary: it is loopback-only and intentionally has no password login.
 
 ## Component plan
@@ -62,3 +63,9 @@ In the current phase, the per-site flow is implemented locally: an unverified HT
 ## Persistence strategy
 
 SQLite is used for configuration, bans, security events and retained logs. High-frequency request logging is queued in a bounded in-memory channel and flushed in batches by one writer thread. Request handling never performs a synchronous SQLite write. Ordinary request logs may be dropped when the queue is full; security and ban events use a separate blocking queue.
+
+## Nginx 内联防护
+
+`mode = "nginx"` 的站点不经过 Bot Gate 转发源站。Bot Gate 自动在匹配 `server_name` 的 Nginx vhost 中插入一个受控 include；该 include 使用 `auth_request` 请求本机 Bot Gate。验证通过后 Nginx 继续处理原有静态文件、PHP、`/api/` 和 WebSocket 配置。验证页和提交路径位于 `/_bot_gate/`，由 Nginx 单独代理给 Bot Gate 并绕过 auth 子请求。
+
+这和 `mode = "proxy"` 不同：proxy 模式仍需要一个不可公网绕过的 `target`。Nginx 内联模式的 `target` 必须为空。

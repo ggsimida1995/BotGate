@@ -1,6 +1,6 @@
 [package]
 name = "bot-gate"
-version = "0.2.39"
+version = "0.2.40"
 edition = "2021"
 description = "Cross-platform local web bot gate and reverse proxy"
 license = "MIT"
@@ -11,10 +11,8 @@ anyhow = "1"
 axum-server = { version = "0.7.2", features = ["tls-rustls"] }
 axum = "0.8"
 base64 = "0.22"
-bytes = "1"
 ed25519-dalek = "2"
 hmac = "0.12"
-http-body-util = "0.1"
 hyper = { version = "1", features = ["client", "http1"] }
 hyper-util = { version = "0.1", features = ["client-legacy", "http1", "tokio"] }
 ipnet = "2"
