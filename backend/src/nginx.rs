@@ -19,11 +19,17 @@ pub(crate) struct NginxDetection {
     pub(crate) binary: Option<String>,
     pub(crate) config_file: Option<String>,
     pub(crate) message: String,
+    pub(crate) diagnostic: Option<String>,
 }
 
 pub(crate) fn resolve_config(config: &NginxConfig) -> Result<NginxConfig> {
     let mut resolved = config.clone();
     resolved.binary = resolve_binary(&config.binary)?;
+    if resolved.config_file.trim().is_empty() {
+        if let Some(config_file) = infer_config_file(&resolved.binary) {
+            resolved.config_file = config_file.to_string_lossy().into_owned();
+        }
+    }
     Ok(resolved)
 }
 
@@ -36,12 +42,13 @@ pub(crate) fn detect(config: &NginxConfig) -> NginxDetection {
                 config_valid: false,
                 binary: None,
                 config_file: None,
-                message: error.to_string(),
+                message: "Nginx 自动检测失败".to_string(),
+                diagnostic: Some(error.to_string()),
             }
         }
     };
 
-    let mut command = Command::new(&resolved.binary);
+    let mut command = nginx_command(&resolved.binary);
     add_config_arg(&mut command, &resolved.config_file);
     match command.arg("-t").output() {
         Ok(output) if output.status.success() => NginxDetection {
@@ -50,20 +57,23 @@ pub(crate) fn detect(config: &NginxConfig) -> NginxDetection {
             binary: Some(resolved.binary),
             config_file: (!resolved.config_file.is_empty()).then_some(resolved.config_file),
             message: "已找到 Nginx，配置校验通过".to_string(),
+            diagnostic: None,
         },
         Ok(output) => NginxDetection {
             available: true,
             config_valid: false,
             binary: Some(resolved.binary),
             config_file: (!resolved.config_file.is_empty()).then_some(resolved.config_file),
-            message: format!("已找到 Nginx，但配置校验失败：{}", diagnostic_tail(&output)),
+            message: "已找到 Nginx，但配置校验失败".to_string(),
+            diagnostic: Some(diagnostic_text(&output)),
         },
         Err(error) => NginxDetection {
             available: true,
             config_valid: false,
             binary: Some(resolved.binary),
             config_file: (!resolved.config_file.is_empty()).then_some(resolved.config_file),
-            message: format!("已找到 Nginx，但无法执行配置校验：{error}"),
+            message: "已找到 Nginx，但无法执行配置校验".to_string(),
+            diagnostic: Some(error.to_string()),
         },
     }
 }
@@ -200,7 +210,39 @@ fn is_default_binary(binary: &str) -> bool {
 }
 
 fn can_execute(binary: &str) -> bool {
-    Command::new(binary).arg("-v").output().is_ok()
+    nginx_command(binary).arg("-v").output().is_ok()
+}
+
+fn nginx_command(binary: &str) -> Command {
+    let mut command = Command::new(binary);
+    hide_windows_console(&mut command);
+    command
+}
+
+fn hide_windows_console(_command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+
+        _command.creation_flags(0x08000000);
+    }
+}
+
+fn infer_config_file(binary: &str) -> Option<PathBuf> {
+    let binary = Path::new(binary);
+    let parent = binary.parent()?;
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    [
+        Some(parent.join("conf").join("nginx.conf")),
+        parent
+            .parent()
+            .map(|root| root.join("conf").join("nginx.conf")),
+    ]
+    .into_iter()
+    .flatten()
+    .find(|path| path.is_file())
 }
 
 fn nginx_binary_candidates() -> Vec<PathBuf> {
@@ -264,7 +306,9 @@ fn nginx_binary_candidates() -> Vec<PathBuf> {
 
 #[cfg(target_os = "windows")]
 fn running_nginx_binary_candidates() -> Vec<PathBuf> {
-    let output = Command::new("powershell.exe")
+    let mut command = Command::new("powershell.exe");
+    hide_windows_console(&mut command);
+    let output = command
         .args([
             "-NoProfile",
             "-NonInteractive",
@@ -297,51 +341,52 @@ where
     candidates.into_iter().find(|path| path.is_file())
 }
 
-fn diagnostic_tail(output: &std::process::Output) -> String {
+fn diagnostic_text(output: &std::process::Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stderr
-        .lines()
-        .last()
-        .or_else(|| stdout.lines().last())
-        .unwrap_or("unknown nginx error")
-        .trim()
-        .to_string()
+    let diagnostic = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    if diagnostic.is_empty() {
+        "unknown nginx error".to_string()
+    } else {
+        diagnostic
+    }
 }
 
 fn test_and_reload(config: &NginxConfig) -> Result<()> {
-    let mut test = Command::new(&config.binary);
+    let mut test = nginx_command(&config.binary);
     add_config_arg(&mut test, &config.config_file);
     let test = test
         .arg("-t")
         .output()
         .with_context(|| format!("无法执行 {} -t", config.binary))?;
     if !test.status.success() {
-        bail!(
-            "Nginx 配置校验失败: {}",
-            String::from_utf8_lossy(&test.stderr).trim()
-        );
+        bail!("Nginx 配置校验失败: {}", diagnostic_text(&test));
     }
 
-    let mut reload = Command::new(&config.binary);
+    let mut reload = nginx_command(&config.binary);
     add_config_arg(&mut reload, &config.config_file);
     let reload = reload
         .args(["-s", "reload"])
         .output()
         .with_context(|| format!("无法执行 {} -s reload", config.binary))?;
     if !reload.status.success() {
-        bail!(
-            "Nginx 平滑重载失败: {}",
-            String::from_utf8_lossy(&reload.stderr).trim()
-        );
+        bail!("Nginx 平滑重载失败: {}", diagnostic_text(&reload));
     }
     Ok(())
 }
 
 fn add_config_arg(command: &mut Command, config_file: &str) {
     if !config_file.trim().is_empty() {
-        command.args(["-c", config_file]);
+        command.arg("-c").arg(nginx_path_argument(config_file));
     }
+}
+
+fn nginx_path_argument(path: &str) -> String {
+    path.replace('\\', "/")
 }
 
 fn include_path(config: &NginxConfig, host: &str) -> Result<PathBuf> {
@@ -389,7 +434,7 @@ fn read_vhost_directory(directory: &str) -> Result<Vec<(PathBuf, String)>> {
 }
 
 fn discover_loaded_config_files(config: &NginxConfig) -> Result<Vec<(PathBuf, String)>> {
-    let mut command = Command::new(&config.binary);
+    let mut command = nginx_command(&config.binary);
     add_config_arg(&mut command, &config.config_file);
     let output = command.arg("-T").output().with_context(|| {
         format!(
@@ -403,11 +448,7 @@ fn discover_loaded_config_files(config: &NginxConfig) -> Result<Vec<(PathBuf, St
         bail!(
             "无法读取 Nginx 生效配置（{} -T）：{}",
             config.binary,
-            diagnostic
-                .lines()
-                .last()
-                .unwrap_or("unknown nginx error")
-                .trim()
+            diagnostic.trim()
         );
     }
 
@@ -659,5 +700,30 @@ mod tests {
         let candidates = explicit_binary_candidates("/opt/nginx");
         assert!(candidates.contains(&PathBuf::from("/opt/nginx/nginx")));
         assert!(candidates.contains(&PathBuf::from("/opt/nginx/sbin/nginx")));
+    }
+
+    #[test]
+    fn normalizes_windows_paths_for_nginx_command_arguments() {
+        assert_eq!(
+            nginx_path_argument(r"D:\wwwroot\conf\nginx.conf"),
+            "D:/wwwroot/conf/nginx.conf"
+        );
+    }
+
+    #[test]
+    fn infers_nginx_config_from_an_explicit_install_directory() {
+        let root =
+            std::env::temp_dir().join(format!("bot-gate-nginx-config-{}", std::process::id()));
+        let binary = root.join("nginx.exe");
+        let config = root.join("conf/nginx.conf");
+        fs::create_dir_all(config.parent().unwrap()).unwrap();
+        fs::write(&config, b"events {}\n").unwrap();
+
+        assert_eq!(
+            infer_config_file(&binary.to_string_lossy()),
+            Some(config.clone())
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

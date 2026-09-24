@@ -792,9 +792,18 @@ function AdminConsole() {
                       showIcon
                       message={systemInfo.nginx_detection.message}
                       description={
-                        systemInfo.nginx_detection.binary
-                          ? `程序：${systemInfo.nginx_detection.binary}${systemInfo.nginx_detection.config_file ? `；配置：${systemInfo.nginx_detection.config_file}` : "；配置：使用 Nginx 默认配置"}`
-                          : "请先启动 Nginx，或在站点路由右侧填写 Nginx 运行目录。"
+                        <div>
+                          <div>
+                            {systemInfo.nginx_detection.binary
+                              ? `程序：${systemInfo.nginx_detection.binary}${systemInfo.nginx_detection.config_file ? `；配置：${systemInfo.nginx_detection.config_file}` : "；配置：使用 Nginx 默认配置"}`
+                              : "请先启动 Nginx，或在站点路由右侧填写 Nginx 运行目录。"}
+                          </div>
+                          {systemInfo.nginx_detection.diagnostic && (
+                            <pre className="nginx-diagnostic">
+                              {systemInfo.nginx_detection.diagnostic}
+                            </pre>
+                          )}
+                        </div>
                       }
                       action={
                         <Button size="small" onClick={detectNginx}>

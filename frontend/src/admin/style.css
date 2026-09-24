@@ -118,6 +118,7 @@ button, input { font-family: inherit; }
 .management-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 0 12px; margin-bottom: 12px; border-bottom: 1px solid #edf3f0; }
 .management-panel-head .section-title { margin: 0; }
 .management-panel .ant-table-wrapper { overflow-x: auto; }
+.nginx-diagnostic { margin: 10px 0 0; padding: 10px 12px; overflow: auto; color: #6d302b; background: #fff7f5; border: 1px solid #ffd9d2; border-radius: 6px; font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: pre-wrap; }
 .log-filter-form { margin-bottom: 16px; }
 .log-filter-form .ant-input { min-width: 145px; }
 .log-filter-form .ant-form-item:first-child .ant-input { min-width: 320px; }
