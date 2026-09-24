@@ -435,7 +435,7 @@ fn find_vhost(config: &NginxConfig, host: &str) -> Result<PathBuf> {
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [path] => Ok(path.clone()),
-        [] => bail!("未找到 server_name 包含 {host} 的 Nginx vhost；请确认该站点已加载且 nginx -T 可读取配置"),
+        [] => bail!("未找到匹配 {host} 的 Nginx vhost 或默认 server；请确认该站点已加载且 nginx -T 可读取配置"),
         _ => bail!("找到多个包含 {host} 的 Nginx vhost，拒绝自动修改"),
     }
 }
@@ -605,11 +605,14 @@ fn insert_marker(body: &str, host: &str, include: &Path) -> Result<String> {
 }
 
 fn matching_server_closes(body: &str, host: &str) -> Result<Vec<usize>> {
-    let mut blocks = Vec::new();
+    let mut exact_blocks = Vec::new();
+    let mut fallback_blocks = Vec::new();
     let mut offset = 0;
     let mut start = None;
     let mut depth = 0i32;
     let mut names_match = false;
+    let mut fallback_match = false;
+    let mut has_server_name = false;
     for line in body.split_inclusive('\n') {
         let code = line.split('#').next().unwrap_or_default();
         let trimmed = code.trim();
@@ -617,14 +620,28 @@ fn matching_server_closes(body: &str, host: &str) -> Result<Vec<usize>> {
             start = Some(offset);
             depth = 0;
             names_match = false;
+            fallback_match = false;
+            has_server_name = false;
         }
-        if start.is_some() && trimmed.starts_with("server_name") {
-            let mut names = trimmed
+        if start.is_some() && depth == 1 && trimmed.starts_with("server_name") {
+            has_server_name = true;
+            let names = trimmed
                 .trim_start_matches("server_name")
                 .trim()
                 .trim_end_matches(';')
                 .split_whitespace();
-            names_match |= names.any(|name| name.eq_ignore_ascii_case(host));
+            for name in names {
+                names_match |= name.eq_ignore_ascii_case(host);
+                fallback_match |= name == "_";
+            }
+        }
+        if start.is_some() && depth == 1 && trimmed.starts_with("listen") {
+            fallback_match |= trimmed
+                .trim_start_matches("listen")
+                .trim()
+                .trim_end_matches(';')
+                .split_whitespace()
+                .any(|value| value.eq_ignore_ascii_case("default_server"));
         }
         if start.is_some() {
             depth += code.matches('{').count() as i32;
@@ -632,7 +649,10 @@ fn matching_server_closes(body: &str, host: &str) -> Result<Vec<usize>> {
             if depth == 0 {
                 if names_match {
                     let close = offset + code.rfind('}').context("server block missing close")?;
-                    blocks.push(close);
+                    exact_blocks.push(close);
+                } else if fallback_match || !has_server_name {
+                    let close = offset + code.rfind('}').context("server block missing close")?;
+                    fallback_blocks.push(close);
                 }
                 start = None;
             }
@@ -642,7 +662,11 @@ fn matching_server_closes(body: &str, host: &str) -> Result<Vec<usize>> {
     if start.is_some() {
         bail!("Nginx server block braces are unbalanced");
     }
-    Ok(blocks)
+    if exact_blocks.is_empty() {
+        Ok(fallback_blocks)
+    } else {
+        Ok(exact_blocks)
+    }
 }
 
 #[cfg(test)]
@@ -659,6 +683,38 @@ mod tests {
             2
         );
         assert!(!remove_marker(&inserted, "dada.com").contains("bot-gate:inline:dada.com"));
+    }
+
+    #[test]
+    fn matches_an_ip_to_a_default_or_catch_all_server() {
+        let source = "server {\n listen 80 default_server;\n server_name _;\n}\n";
+        let include = Path::new("/tmp/bot-gate/172.22.31.39.conf");
+        let inserted = insert_marker(source, "172.22.31.39", include).unwrap();
+        assert_eq!(
+            inserted
+                .matches("bot-gate:inline:172.22.31.39:begin")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn prefers_an_exact_ip_server_over_the_default_server() {
+        let source = "server {\n listen 80 default_server;\n server_name _;\n}\nserver {\n listen 80;\n server_name 172.22.31.39;\n}\n";
+        let closes = matching_server_closes(source, "172.22.31.39").unwrap();
+        assert_eq!(closes.len(), 1);
+        assert!(closes[0] > source.find("server_name 172.22.31.39").unwrap());
+    }
+
+    #[test]
+    fn matches_a_server_without_a_server_name_for_an_ip_site() {
+        let source = "server {\n listen 18081;\n root d:/ps_dev/dist;\n}\n";
+        assert_eq!(
+            matching_server_closes(source, "172.22.31.39")
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

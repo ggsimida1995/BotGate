@@ -7,6 +7,10 @@ fn normalizes_host_and_port() {
         normalize_host("Project-A.TEST:8080").unwrap(),
         "project-a.test"
     );
+    assert_eq!(
+        normalize_host("172.22.31.39:18081").unwrap(),
+        "172.22.31.39"
+    );
     assert_eq!(normalize_host("project-a.test.").unwrap(), "project-a.test");
 }
 

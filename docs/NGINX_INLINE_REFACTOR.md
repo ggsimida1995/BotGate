@@ -31,7 +31,7 @@
 
 - 新增 `[nginx]` 配置：Nginx 可执行文件、可选的主配置文件、可选 vhost 目录和受控 include 目录。
 - 不把 ServBay、宝塔或其他面板路径写进发布包：`binary = "nginx"` 会检查 PATH、常见安装目录以及 Windows 正在运行的 `nginx.exe`，`config_file = ""` 使用 Nginx 默认配置，`vhost_dir = ""` 时通过 `nginx -T` 发现实际加载的配置文件。
-- 保存/启用 Nginx 模式站点时，按 `server_name` 找到对应 vhost，写入带 Bot Gate 标记的 include。
+- 保存/启用 Nginx 模式站点时，优先按 `server_name` 找到对应 vhost；IP 站点没有精确 `server_name` 时使用 `server_name _` 或 `listen ... default_server`，再写入带 Bot Gate 标记的 include。
 - 生成站点专属 include；校验并平滑重载；失败自动还原。
 - 暂停/删除 Nginx 模式站点时自动移除 include 并校验、重载。
 
