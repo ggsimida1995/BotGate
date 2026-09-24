@@ -215,6 +215,12 @@ fn can_execute(binary: &str) -> bool {
 
 fn nginx_command(binary: &str) -> Command {
     let mut command = Command::new(binary);
+    if let Some(prefix) = nginx_prefix(binary) {
+        command.current_dir(&prefix);
+        command
+            .arg("-p")
+            .arg(nginx_path_argument(&prefix.to_string_lossy()));
+    }
     hide_windows_console(&mut command);
     command
 }
@@ -225,6 +231,22 @@ fn hide_windows_console(_command: &mut Command) {
         use std::os::windows::process::CommandExt;
 
         _command.creation_flags(0x08000000);
+    }
+}
+
+fn nginx_prefix(binary: &str) -> Option<PathBuf> {
+    let binary = Path::new(binary);
+    let parent = binary.parent()?.to_path_buf();
+    if parent.as_os_str().is_empty() {
+        return None;
+    }
+    if parent
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case("sbin"))
+    {
+        parent.parent().map(Path::to_path_buf)
+    } else {
+        Some(parent)
     }
 }
 
@@ -707,6 +729,18 @@ mod tests {
         assert_eq!(
             nginx_path_argument(r"D:\wwwroot\conf\nginx.conf"),
             "D:/wwwroot/conf/nginx.conf"
+        );
+    }
+
+    #[test]
+    fn derives_nginx_prefix_from_the_binary_location() {
+        assert_eq!(
+            nginx_prefix("/opt/nginx/nginx"),
+            Some(PathBuf::from("/opt/nginx"))
+        );
+        assert_eq!(
+            nginx_prefix("/opt/nginx/sbin/nginx"),
+            Some(PathBuf::from("/opt/nginx"))
         );
     }
 
