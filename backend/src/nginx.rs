@@ -151,10 +151,14 @@ pub(crate) fn is_site_protected(config: &NginxConfig, host: &str) -> Result<bool
 fn resolve_binary(binary: &str) -> Result<String> {
     let requested = binary.trim();
     if !requested.is_empty() && !is_default_binary(requested) {
-        if can_execute(requested) {
-            return Ok(requested.to_string());
+        let candidates = explicit_binary_candidates(requested);
+        if let Some(path) = candidates
+            .iter()
+            .find(|path| can_execute(&path.to_string_lossy()))
+        {
+            return Ok(path.to_string_lossy().into_owned());
         }
-        bail!("无法执行配置中的 Nginx：{requested}");
+        bail!("无法执行配置中的 Nginx 文件或目录：{requested}");
     }
 
     if can_execute("nginx") {
@@ -174,6 +178,21 @@ fn resolve_binary(binary: &str) -> Result<String> {
             .collect::<Vec<_>>()
             .join(", ")
     )
+}
+
+fn explicit_binary_candidates(requested: &str) -> Vec<PathBuf> {
+    let requested = PathBuf::from(requested);
+    let name = if cfg!(target_os = "windows") {
+        "nginx.exe"
+    } else {
+        "nginx"
+    };
+    vec![
+        requested.clone(),
+        requested.join(name),
+        requested.join("sbin").join(name),
+        requested.join("nginx").join(name),
+    ]
 }
 
 fn is_default_binary(binary: &str) -> bool {
@@ -633,5 +652,12 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn expands_an_nginx_runtime_directory_to_common_binary_locations() {
+        let candidates = explicit_binary_candidates("/opt/nginx");
+        assert!(candidates.contains(&PathBuf::from("/opt/nginx/nginx")));
+        assert!(candidates.contains(&PathBuf::from("/opt/nginx/sbin/nginx")));
     }
 }

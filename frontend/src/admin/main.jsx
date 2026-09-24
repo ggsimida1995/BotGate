@@ -38,6 +38,7 @@ import {
   PlusOutlined,
   ReloadOutlined,
   SafetyCertificateOutlined,
+  SettingOutlined,
   SyncOutlined,
   UnlockOutlined,
 } from "@ant-design/icons";
@@ -121,6 +122,7 @@ function AdminConsole() {
   const [gatewayStatus, setGatewayStatus] = useState({ running: false });
   const [logModal, setLogModal] = useState(null);
   const [addModal, setAddModal] = useState(null);
+  const [nginxPathModal, setNginxPathModal] = useState(false);
   const [licenseModal, setLicenseModal] = useState(false);
   const [updateModal, setUpdateModal] = useState(false);
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -137,6 +139,7 @@ function AdminConsole() {
   const [siteForm] = Form.useForm();
   const [licenseForm] = Form.useForm();
   const [nginxForm] = Form.useForm();
+  const [nginxPathForm] = Form.useForm();
   const siteMode = Form.useWatch("mode", siteForm) || "nginx";
   const licenseStatus = systemInfo.license?.status || "disabled";
   const licenseLabel =
@@ -147,8 +150,11 @@ function AdminConsole() {
         : "未激活";
 
   useEffect(() => {
-    if (systemInfo.nginx) nginxForm.setFieldsValue(systemInfo.nginx);
-  }, [nginxForm, systemInfo.nginx]);
+    if (systemInfo.nginx) {
+      nginxForm.setFieldsValue(systemInfo.nginx);
+      nginxPathForm.setFieldsValue({ binary: systemInfo.nginx.binary });
+    }
+  }, [nginxForm, nginxPathForm, systemInfo.nginx]);
 
   async function refresh() {
     setLoading(true);
@@ -375,12 +381,28 @@ function AdminConsole() {
         ...current,
         nginx_detection: result.nginx_detection,
       }));
+      if (result.nginx_detection.binary) {
+        nginxPathForm.setFieldsValue({ binary: result.nginx_detection.binary });
+      }
       message[result.nginx_detection.config_valid ? "success" : "warning"](
         result.nginx_detection.message,
       );
     } catch (cause) {
       message.error(cause.message);
     }
+  }
+
+  async function saveNginxPath(values) {
+    const current = systemInfo.nginx || {};
+    const saved = await saveNginxConfig({
+      enabled: current.enabled ?? true,
+      binary: values.binary,
+      config_file: current.config_file || "",
+      vhost_dir: current.vhost_dir || "",
+      include_dir: current.include_dir || "",
+    });
+    if (saved) setNginxPathModal(false);
+    return saved;
   }
 
   async function saveSite(values) {
@@ -701,13 +723,26 @@ function AdminConsole() {
                       title="受保护站点"
                       description={`${sites.length} 个站点；Nginx 内联模式无需迁移源站地址`}
                     />
-                    <Button
-                      type="primary"
-                      icon={<PlusOutlined />}
-                      onClick={() => openAddModal("site")}
-                    >
-                      添加站点
-                    </Button>
+                    <Space wrap>
+                      <Button
+                        icon={<SettingOutlined />}
+                        onClick={() => {
+                          nginxPathForm.setFieldsValue({
+                            binary: systemInfo.nginx?.binary || "",
+                          });
+                          setNginxPathModal(true);
+                        }}
+                      >
+                        设置 Nginx 路径
+                      </Button>
+                      <Button
+                        type="primary"
+                        icon={<PlusOutlined />}
+                        onClick={() => openAddModal("site")}
+                      >
+                        添加站点
+                      </Button>
+                    </Space>
                   </div>
                   <Alert
                     type="info"
@@ -744,7 +779,7 @@ function AdminConsole() {
                     type="info"
                     showIcon
                     message="Bot Gate 会自动寻找本机正在运行的 Nginx"
-                    description="Windows 会从运行中的 nginx.exe 读取实际安装位置；其他系统会检查 PATH 和常见安装目录。Nginx 的站点配置文件也会通过 nginx -T 自动发现，正常使用不需要填写安装路径。"
+                    description="默认会自动检测 Nginx；如果安装目录不在 PATH 中，可直接在“站点路由”右侧设置运行目录。Nginx 的站点配置文件仍会通过 nginx -T 自动发现。"
                     style={{ marginBottom: 16 }}
                   />
                   {systemInfo.nginx_detection && (
@@ -759,7 +794,7 @@ function AdminConsole() {
                       description={
                         systemInfo.nginx_detection.binary
                           ? `程序：${systemInfo.nginx_detection.binary}${systemInfo.nginx_detection.config_file ? `；配置：${systemInfo.nginx_detection.config_file}` : "；配置：使用 Nginx 默认配置"}`
-                          : "请先启动 Nginx；如果 Nginx 使用了非常规目录，可在高级设置中选择可执行文件。"
+                          : "请先启动 Nginx，或在站点路由右侧填写 Nginx 运行目录。"
                       }
                       action={
                         <Button size="small" onClick={detectNginx}>
@@ -790,12 +825,12 @@ function AdminConsole() {
                       保存 Nginx 设置
                     </Button>
                     <details className="nginx-advanced-settings">
-                      <summary>高级设置：自定义 Nginx 路径</summary>
+                      <summary>高级设置：其他 Nginx 配置</summary>
                       <Text type="secondary">
                         只有 Nginx 未启动、且安装目录不在 PATH 或常见目录时才需要使用。普通用户无需填写。
                       </Text>
-                      <Form.Item name="binary" label="Nginx 可执行文件">
-                        <Input placeholder="nginx 或 nginx.exe 的完整路径" />
+                      <Form.Item name="binary" label="Nginx 运行目录或程序路径">
+                        <Input placeholder="例如 D:\\nginx 或 nginx.exe 的完整路径" />
                       </Form.Item>
                       <Form.Item name="config_file" label="Nginx 主配置文件">
                         <Input placeholder="可选，例如 conf/nginx.conf" />
@@ -883,6 +918,39 @@ function AdminConsole() {
             },
           ]}
         />
+        <Modal
+          open={nginxPathModal}
+          centered
+          title="设置 Nginx 运行目录"
+          footer={null}
+          destroyOnClose
+          onCancel={() => setNginxPathModal(false)}
+        >
+          <Form
+            form={nginxPathForm}
+            layout="vertical"
+            onFinish={saveNginxPath}
+          >
+            <Form.Item
+              name="binary"
+              label="Nginx 运行目录或程序路径"
+              rules={[{ required: true, message: "请输入 Nginx 安装目录或 nginx.exe 路径" }]}
+            >
+              <Input placeholder="例如 D:\\nginx 或 /usr/local/nginx" />
+            </Form.Item>
+            <Text type="secondary">
+              可以填写 Nginx 安装目录，也可以填写 nginx.exe 的完整路径。保存后，添加站点、启动保护、取消保护和配置重载都会使用这里的路径。
+            </Text>
+            <Space style={{ marginTop: 20 }}>
+              <Button onClick={detectNginx} icon={<ReloadOutlined />}>
+                自动检测
+              </Button>
+              <Button type="primary" htmlType="submit" icon={<CheckCircleFilled />}>
+                保存并检测
+              </Button>
+            </Space>
+          </Form>
+        </Modal>
         <Modal
           open={Boolean(addModal)}
           centered
