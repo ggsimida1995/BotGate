@@ -207,15 +207,20 @@ fn nginx_binary_candidates() -> Vec<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        let roots = [
-            PathBuf::from(r"C:\nginx"),
-            env::var_os("ProgramFiles").map(PathBuf::from),
-            env::var_os("ProgramFiles(x86)").map(PathBuf::from),
-            env::var_os("ProgramW6432").map(PathBuf::from),
-            env::var_os("LOCALAPPDATA").map(PathBuf::from),
-            env::var_os("USERPROFILE").map(PathBuf::from),
-        ];
-        for root in roots.into_iter().flatten() {
+        let mut roots = vec![PathBuf::from(r"C:\nginx")];
+        roots.extend(
+            [
+                "ProgramFiles",
+                "ProgramFiles(x86)",
+                "ProgramW6432",
+                "LOCALAPPDATA",
+                "USERPROFILE",
+            ]
+            .into_iter()
+            .filter_map(env::var_os)
+            .map(PathBuf::from),
+        );
+        for root in roots {
             candidates.push(root.join("nginx.exe"));
             candidates.push(root.join("nginx").join("nginx.exe"));
             candidates.push(root.join("nginx").join("sbin").join("nginx.exe"));
