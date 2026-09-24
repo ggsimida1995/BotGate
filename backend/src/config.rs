@@ -373,7 +373,9 @@ pub(crate) fn default_site_mode() -> String {
 }
 
 pub(crate) fn default_listen() -> String {
-    "127.0.0.1:18081".to_string()
+    // Let the OS choose a loopback port. Nginx inline mode uses the actual
+    // bound address; this must never collide with the user's source service.
+    "127.0.0.1:0".to_string()
 }
 
 pub(crate) fn default_request_timeout() -> u64 {

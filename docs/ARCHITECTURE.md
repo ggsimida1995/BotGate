@@ -18,7 +18,7 @@ Public HTTP/TLS listener (Bot Gate)
 
 When verification is enabled, a request without a valid site-bound HMAC cookie is stopped at the verification step. It is redirected to the Challenge for HTML navigation or returned as `403` for API/non-GET requests; it never reaches an upstream. Whitelist entries can change rate/risk policy only and cannot bypass this gate.
 
-The admin listener is separate and defaults to `127.0.0.1:9090`. Process startup binds the admin listener only; the public HTTP/TLS listeners are owned by `GatewayController` and remain stopped until the operator starts the gateway from the dashboard. Gateway start checks the configured license first, so an enabled license that is missing, invalid or expired prevents any public listener from binding.
+The admin listener is separate and defaults to `127.0.0.1:9090`. The desktop starts `GatewayController` on a loopback-only ephemeral port by default; Nginx inline mode uses the actual bound port, so the gateway never claims the source web server's business port. Standalone proxy deployments can set an explicit public listener. Gateway start checks the configured license first, so an enabled license that is missing, invalid or expired prevents any public listener from binding.
 
 ## Trust boundaries
 

@@ -338,7 +338,30 @@ pub(crate) async fn admin_gateway_start(
         );
     }
     match state.gateway.start().await {
-        Ok(gateway) => json_response(StatusCode::OK, serde_json::json!({"gateway": gateway})),
+        Ok(gateway) => {
+            let nginx = match current_nginx_config(&state) {
+                Ok(config) => config,
+                Err(error) => {
+                    error!(error = %error, "failed to read Nginx settings after gateway start");
+                    return json_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        serde_json::json!({"message":"Nginx 设置不可用"}),
+                    );
+                }
+            };
+            if nginx.enabled {
+                if let Err(error) = resync_nginx_sites(&state.storage, &nginx, &gateway.http_listen)
+                {
+                    error!(error = %error, "failed to resync Nginx inline sites after gateway start");
+                    state.gateway.stop().await;
+                    return json_response(
+                        StatusCode::BAD_GATEWAY,
+                        serde_json::json!({"message":error.to_string()}),
+                    );
+                }
+            }
+            json_response(StatusCode::OK, serde_json::json!({"gateway": gateway}))
+        }
         Err(error) => {
             error!(error = %error, "failed to start gateway");
             json_response(
@@ -734,6 +757,22 @@ fn managed_site(
     })
 }
 
+pub(crate) fn resync_nginx_sites(
+    storage: &Storage,
+    nginx: &NginxConfig,
+    gate_listen: &str,
+) -> Result<()> {
+    if !nginx.enabled {
+        return Ok(());
+    }
+    for site in storage.managed_sites()? {
+        if site.mode == "nginx" {
+            crate::nginx::sync_site(nginx, gate_listen, &site)?;
+        }
+    }
+    Ok(())
+}
+
 fn managed_whitelist(input: AdminWhitelistInput) -> Result<ManagedWhitelist> {
     let value = input.value.trim();
     let kind = if value.parse::<IpAddr>().is_ok() {
@@ -902,8 +941,15 @@ pub(crate) async fn admin_save_site(
         .managed_sites()
         .ok()
         .and_then(|sites| sites.into_iter().find(|current| current.host == site.host));
+    let gateway = state.gateway.status().await;
+    if site.mode == "nginx" && !gateway.running {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"message":"Bot Gate 网关尚未启动，无法写入 Nginx 内联防护"}),
+        );
+    }
     if site.mode == "nginx" {
-        if let Err(error) = crate::nginx::sync_site(&nginx, &state.gate_listen, &site) {
+        if let Err(error) = crate::nginx::sync_site(&nginx, &gateway.http_listen, &site) {
             return json_response(
                 StatusCode::BAD_GATEWAY,
                 serde_json::json!({"message":error.to_string()}),
@@ -915,7 +961,7 @@ pub(crate) async fn admin_save_site(
     {
         if let Err(error) = crate::nginx::remove_site(
             &nginx,
-            &state.gate_listen,
+            &gateway.http_listen,
             previous.as_ref().expect("checked"),
         ) {
             return json_response(
@@ -993,8 +1039,15 @@ pub(crate) async fn admin_toggle_site(
     }
     site.enabled = input.enabled;
     let updated = site.clone();
+    let gateway = state.gateway.status().await;
+    if updated.mode == "nginx" && updated.enabled && !gateway.running {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({"message":"Bot Gate 网关尚未启动，无法启用 Nginx 内联防护"}),
+        );
+    }
     if updated.mode == "nginx" {
-        if let Err(error) = crate::nginx::sync_site(&nginx, &state.gate_listen, &updated) {
+        if let Err(error) = crate::nginx::sync_site(&nginx, &gateway.http_listen, &updated) {
             return json_response(
                 StatusCode::BAD_GATEWAY,
                 serde_json::json!({"message":error.to_string()}),
@@ -1055,7 +1108,8 @@ pub(crate) async fn admin_delete_site(
         .ok()
         .and_then(|sites| sites.into_iter().find(|site| site.host == host));
     if let Some(site) = existing.as_ref().filter(|site| site.mode == "nginx") {
-        if let Err(error) = crate::nginx::remove_site(&nginx, &state.gate_listen, site) {
+        let gateway = state.gateway.status().await;
+        if let Err(error) = crate::nginx::remove_site(&nginx, &gateway.http_listen, site) {
             return json_response(
                 StatusCode::BAD_GATEWAY,
                 serde_json::json!({"message":error.to_string()}),

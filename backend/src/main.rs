@@ -182,6 +182,19 @@ pub(crate) async fn bind_listener(listen: &str, label: &str) -> Result<(TcpListe
     }
 }
 
+pub(crate) async fn bind_gateway_listener(listen: &str) -> Result<(TcpListener, SocketAddr)> {
+    let configured: SocketAddr = listen
+        .parse()
+        .with_context(|| format!("invalid gateway listener address: {listen}"))?;
+    let listener = TcpListener::bind(configured).await.with_context(|| {
+        format!(
+            "failed to bind gateway listener {configured}; configure an available listener or use 127.0.0.1:0 for Nginx inline mode"
+        )
+    })?;
+    let address = listener.local_addr()?;
+    Ok((listener, address))
+}
+
 fn default_config_path() -> PathBuf {
     let mut candidates = Vec::new();
     #[cfg(target_os = "macos")]
@@ -282,7 +295,6 @@ struct AdminState {
     gateway: Arc<GatewayController>,
     update_progress: updater::UpdateProgressState,
     nginx: Arc<RwLock<NginxConfig>>,
-    gate_listen: String,
 }
 
 pub(crate) fn unix_now() -> u64 {
@@ -898,6 +910,7 @@ async fn main() {
     let log_path = startup_log_path(&config_path);
     if let Err(error) = run().await {
         report_startup_error(&error, &log_path);
+        std::process::exit(1);
     }
 }
 
@@ -979,6 +992,11 @@ async fn run() -> Result<()> {
         );
     }
     let nginx_config = effective_nginx_config(&state.storage, &config.nginx)?;
+    let gateway_status = gateway.status().await;
+    if gateway_status.running && nginx_config.enabled {
+        admin::resync_nginx_sites(&state.storage, &nginx_config, &gateway_status.http_listen)
+            .context("failed to resync Nginx inline sites at startup")?;
+    }
     let admin_state = if config.admin.enabled {
         Some(Arc::new(AdminState {
             storage: state.storage.clone(),
@@ -988,7 +1006,6 @@ async fn run() -> Result<()> {
             gateway: gateway.clone(),
             update_progress: Arc::new(Mutex::new(updater::UpdateProgress::default())),
             nginx: Arc::new(RwLock::new(nginx_config)),
-            gate_listen: config.server.listen.clone(),
         }))
     } else {
         None

@@ -182,8 +182,20 @@ fn migrate_legacy_default_listener(config: &Path) -> std::io::Result<()> {
         if trimmed.starts_with('[') {
             in_server = trimmed == "[server]";
         }
-        if in_server && trimmed == r#"listen = "127.0.0.1:8080""# {
-            migrated.push_str(&line.replace("127.0.0.1:8080", "127.0.0.1:18081"));
+        if in_server
+            && matches!(
+                trimmed,
+                r#"listen = "127.0.0.1:8080""# | r#"listen = "127.0.0.1:18081""#
+            )
+        {
+            migrated.push_str(
+                &line.replace(
+                    trimmed
+                        .trim_start_matches("listen = \"")
+                        .trim_end_matches('"'),
+                    "127.0.0.1:0",
+                ),
+            );
             changed = true;
         } else {
             migrated.push_str(line);

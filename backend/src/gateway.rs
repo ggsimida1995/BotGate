@@ -1,17 +1,14 @@
-use std::{io::ErrorKind, net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{extract::Extension, routing::get, Router};
 use axum_server::{tls_rustls::RustlsConfig, Handle as TlsHandle};
 use serde::Serialize;
-use tokio::{
-    net::TcpListener,
-    sync::{oneshot, Mutex},
-};
+use tokio::sync::{oneshot, Mutex};
 use tower_http::{limit::RequestBodyLimitLayer, services::ServeDir};
 use tracing::error;
 
-use crate::{handle_request, nginx_bridge, AppState, RequestScheme};
+use crate::{bind_gateway_listener, handle_request, nginx_bridge, AppState, RequestScheme};
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct GatewayStatus {
@@ -92,24 +89,7 @@ impl GatewayController {
             });
         }
 
-        let configured: SocketAddr = self
-            .http_listen
-            .parse()
-            .with_context(|| format!("invalid gateway listener address: {}", self.http_listen))?;
-        let listener = TcpListener::bind(configured).await.map_err(|error| {
-            let hint = match error.kind() {
-                ErrorKind::AddrInUse => {
-                    "address is already in use; stop the conflicting service or change server.listen"
-                }
-                ErrorKind::PermissionDenied => {
-                    "permission denied (Windows error 10013 usually means the port is reserved); choose another listener such as 127.0.0.1:18081 or run with the required permission"
-                }
-                _ => "check the listener address and operating-system error",
-            };
-            anyhow::Error::new(error)
-                .context(format!("failed to bind gateway listener {configured}; {hint}"))
-        })?;
-        let http_address = listener.local_addr()?;
+        let (listener, http_address) = bind_gateway_listener(&self.http_listen).await?;
         let app = public_app(self.state.clone(), self.body_limit, "http");
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {

@@ -20,7 +20,7 @@ cargo run --release
 
 Windows 和 macOS 使用 Tauri 2 桌面客户端。开发时先构建后端和前端，再运行 `cargo tauri dev --manifest-path desktop/Cargo.toml`；客户端会隐藏后端控制台，自动打开管理窗口，并在系统托盘或菜单栏驻留。发布包由 GitHub Actions 准备 `desktop/resources/` 后执行 `cargo tauri build` 生成。
 
-启动后会自动监听 `[server].listen` 作为 Bot Gate 前置代理；如果该端口已被占用，程序会直接启动失败，避免自动换到随机端口导致公网请求绕过保护。管理端口默认是 `127.0.0.1:9090`，管理台仍可手动停止或重新启动前置网关；许可证启用时必须先激活有效许可证。
+启动后会自动启动 Bot Gate 网关。默认 `[server].listen = "127.0.0.1:0"`，由操作系统分配一个仅供本机 Nginx 内联模式使用的端口，不会占用业务测试端口；管理端口默认是 `127.0.0.1:9090`。独立前置代理模式需要在 `[server].listen` 中明确配置公网监听地址；许可证启用时必须先激活有效许可证。
 
 首次创建配置时，在 `backend/` 目录执行 `cp config.example.toml config.toml`；Windows PowerShell 使用 `Copy-Item config.example.toml config.toml`。
 
@@ -57,7 +57,7 @@ Add the configured hosts to the local hosts file:
 
 The hosts file is `/etc/hosts` on macOS/Linux and `C:\Windows\System32\drivers\etc\hosts` on Windows. `.test` is recommended for local development.
 
-Bot Gate 启动后会自动打开前置网关，然后打开 `http://project-a.test:18081`。Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream. 网关停止时，前置端口不监听，访问会失败；这是为了确保请求不会绕过验证直接到达上游。
+Bot Gate 启动后会自动打开管理台并启动内部网关。Nginx 内联站点仍由 Nginx 的业务端口提供访问，Bot Gate 只接收 Nginx 发来的验证请求。Without a valid cookie, an HTML request is redirected to the Browser Challenge. The page displays a visible security-verification panel; click **请验证您是真人** to start the browser computation. After the challenge succeeds, Bot Gate sets a short-lived HMAC-SHA256 cookie and the original page loads. An unverified API or non-GET request receives `403` and is never sent upstream.
 
 ## Configure a site
 
@@ -93,11 +93,11 @@ npm run dev -- --host 127.0.0.1 --port 3000
 
 For production, the source can be Nginx (or another HTTP server) serving `dist/`. Keep that source listener internal so it cannot bypass Bot Gate.
 
-For example, expose Bot Gate on `0.0.0.0:18081` and bind the production source only to `127.0.0.1:18082`:
+For standalone proxy mode, explicitly expose Bot Gate on a dedicated address such as `0.0.0.0:18082` and bind the production source only to `127.0.0.1:18081`:
 
 ```nginx
 server {
-    listen 127.0.0.1:18082;
+    listen 127.0.0.1:18081;
     server_name _;
 
     # Keep all existing root, try_files, /api and WebSocket locations here.
@@ -109,12 +109,12 @@ Then add this route in **前置代理站点** (the same form works for Vite or a
 ```toml
 [[sites]]
 host = "172.22.31.39"
-target = "http://127.0.0.1:18082"
+target = "http://127.0.0.1:18081"
 policy = "normal"
 enabled = true
 ```
 
-Set `[server].listen` to the public Bot Gate listener, for example `0.0.0.0:18081`, restart Bot Gate, and access `http://172.22.31.39:18081/`. Bot Gate starts this front proxy automatically. Do not leave the source service listening on a public address or its original public port: that path bypasses Browser Challenge.
+Set `[server].listen` to the dedicated public Bot Gate listener, for example `0.0.0.0:18082`, restart Bot Gate, and access `http://172.22.31.39:18082/`. Do not leave the source service listening on a public address or the Bot Gate listener: that path bypasses Browser Challenge.
 
 ## Management dashboard
 
@@ -157,8 +157,8 @@ Pausing a route stops Browser Challenge for that route, but does not alter the s
 ## Verify the gate with curl
 
 ```text
-curl -i -H "Host: project-a.test" http://127.0.0.1:18081/
-curl -i -H "Host: project-a.test" -H "Accept: application/json" http://127.0.0.1:18081/api/user
+curl -i -H "Host: project-a.test" http://127.0.0.1:<Bot-Gate-port>/
+curl -i -H "Host: project-a.test" -H "Accept: application/json" http://127.0.0.1:<Bot-Gate-port>/api/user
 ```
 
 The first command should return `302` with a `/__bot_verify/start` location. The second should return `403`. A whitelist entry may change rate/risk handling, but `skip_challenge` never bypasses signed browser verification.
@@ -167,7 +167,7 @@ The first command should return `302` with a `/__bot_verify/start` location. The
 
 Press `Ctrl-C` to stop Bot Gate. If startup fails, check that the configured ports are free, the upstream is running, `backend/config.toml` is valid, and `frontend/dist/admin.html` and `frontend/dist/challenge.html` are present in the repository. If a browser keeps receiving a challenge, clear the site cookie and verify that the request Host exactly matches a configured `[[sites]]` host.
 
-On Windows desktop, startup diagnostics are written to the installation directory's `logs` folder: `<Bot Gate installation directory>\logs\desktop.log`, `<Bot Gate installation directory>\logs\desktop-backend.log`, and `<Bot Gate installation directory>\logs\bot-gate.log`. If the installation directory is not writable, the desktop falls back to `%APPDATA%\com.ggsimida.botgate\logs\`. The first records desktop launch and admin startup timeout, the second captures backend stdout/stderr, and the third contains timestamped backend startup/runtime logs. Existing desktop configs that still use the old default `127.0.0.1:8080` are migrated once to `127.0.0.1:18081`; manually configured listener values are left unchanged. If startup fails, send these logs with secrets and private hostnames redacted.
+On Windows desktop, startup diagnostics are written to the installation directory's `logs` folder: `<Bot Gate installation directory>\logs\desktop.log`, `<Bot Gate installation directory>\logs\desktop-backend.log`, and `<Bot Gate installation directory>\logs\bot-gate.log`. If the installation directory is not writable, the desktop falls back to `%APPDATA%\com.ggsimida.botgate\logs\`. The first records desktop launch and admin startup timeout, the second captures backend stdout/stderr, and the third contains timestamped backend startup/runtime logs. Existing desktop configs that still use the old defaults `127.0.0.1:8080` or `127.0.0.1:18081` are migrated once to the internal dynamic listener `127.0.0.1:0`; manually configured listener values other than those old defaults are left unchanged. If startup fails, send these logs with secrets and private hostnames redacted.
 
 ## Development checks
 

@@ -51,6 +51,13 @@ async fn falls_back_when_configured_listener_is_already_bound() {
     assert_ne!(actual.port(), configured.port());
 }
 
+#[tokio::test]
+async fn binds_a_loopback_ephemeral_listener() {
+    let (_listener, actual) = bind_listener("127.0.0.1:0", "test").await.unwrap();
+    assert_eq!(actual.ip(), "127.0.0.1".parse::<IpAddr>().unwrap());
+    assert_ne!(actual.port(), 0);
+}
+
 #[test]
 fn logs_only_abnormal_static_asset_requests() {
     assert!(!should_record_request_log(

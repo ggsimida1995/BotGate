@@ -3,11 +3,10 @@
 # Set [admin] below to enable the loopback-only management UI.
 
 [server]
-# The Bot Gate front proxy starts automatically with the process.
-# If this port is occupied, Bot Gate fails instead of silently moving the public entry point.
-# For production front-proxy mode, use a public listener such as
-# 0.0.0.0:18081, and bind the source service only to an internal port.
-listen = "127.0.0.1:18081"
+# The default is a loopback-only ephemeral port. This is the internal Bot Gate
+# listener used by Nginx inline mode; it must not take the source site's port.
+# For standalone front-proxy mode, set an explicit public listener here.
+listen = "127.0.0.1:0"
 request_timeout_secs = 30
 max_header_bytes = 65536
 max_body_size = 104857600
