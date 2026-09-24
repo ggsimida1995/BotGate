@@ -205,6 +205,7 @@ pub(crate) async fn admin_system(
             );
         }
     };
+    let nginx_detection = crate::nginx::detect(&nginx);
     json_response(
         StatusCode::OK,
         serde_json::json!({
@@ -213,8 +214,32 @@ pub(crate) async fn admin_system(
             "release_url": state.public_state.update.release_url,
             "license": crate::license::status(&state.public_state.license),
             "gateway": gateway,
-            "nginx": nginx
+            "nginx": nginx,
+            "nginx_detection": nginx_detection
         }),
+    )
+}
+
+pub(crate) async fn admin_nginx_detect(
+    State(state): State<Arc<AdminState>>,
+    ConnectInfo(remote): ConnectInfo<SocketAddr>,
+) -> Response<Body> {
+    if let Some(response) = admin_access(remote) {
+        return response;
+    }
+    let nginx = match current_nginx_config(&state) {
+        Ok(config) => config,
+        Err(error) => {
+            error!(error = %error, "failed to read Nginx settings for detection");
+            return json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({"message":"Nginx 设置不可用"}),
+            );
+        }
+    };
+    json_response(
+        StatusCode::OK,
+        serde_json::json!({"nginx_detection": crate::nginx::detect(&nginx)}),
     )
 }
 
@@ -664,7 +689,11 @@ fn managed_nginx_config(input: AdminNginxConfigInput, config_path: &FsPath) -> R
         },
     };
     validate_nginx_config(&config)?;
-    Ok(config)
+    if config.enabled {
+        crate::nginx::resolve_config(&config)
+    } else {
+        Ok(config)
+    }
 }
 
 pub(crate) async fn admin_save_nginx(
@@ -719,7 +748,12 @@ pub(crate) async fn admin_save_nginx(
     }
     json_response(
         StatusCode::OK,
-        serde_json::json!({"ok":true,"nginx":nginx,"existing_sites_require_resync":true}),
+        serde_json::json!({
+            "ok": true,
+            "nginx": nginx,
+            "nginx_detection": crate::nginx::detect(&nginx),
+            "existing_sites_require_resync": true
+        }),
     )
 }
 

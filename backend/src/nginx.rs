@@ -1,24 +1,82 @@
 use std::{
     collections::HashSet,
-    fs,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 
 use crate::{ManagedSite, NginxConfig};
 
 const MARKER_PREFIX: &str = "# bot-gate:inline:";
 
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct NginxDetection {
+    pub(crate) available: bool,
+    pub(crate) config_valid: bool,
+    pub(crate) binary: Option<String>,
+    pub(crate) config_file: Option<String>,
+    pub(crate) message: String,
+}
+
+pub(crate) fn resolve_config(config: &NginxConfig) -> Result<NginxConfig> {
+    let mut resolved = config.clone();
+    resolved.binary = resolve_binary(&config.binary)?;
+    Ok(resolved)
+}
+
+pub(crate) fn detect(config: &NginxConfig) -> NginxDetection {
+    let resolved = match resolve_config(config) {
+        Ok(config) => config,
+        Err(error) => {
+            return NginxDetection {
+                available: false,
+                config_valid: false,
+                binary: None,
+                config_file: None,
+                message: error.to_string(),
+            }
+        }
+    };
+
+    let mut command = Command::new(&resolved.binary);
+    add_config_arg(&mut command, &resolved.config_file);
+    match command.arg("-t").output() {
+        Ok(output) if output.status.success() => NginxDetection {
+            available: true,
+            config_valid: true,
+            binary: Some(resolved.binary),
+            config_file: (!resolved.config_file.is_empty()).then_some(resolved.config_file),
+            message: "已找到 Nginx，配置校验通过".to_string(),
+        },
+        Ok(output) => NginxDetection {
+            available: true,
+            config_valid: false,
+            binary: Some(resolved.binary),
+            config_file: (!resolved.config_file.is_empty()).then_some(resolved.config_file),
+            message: format!("已找到 Nginx，但配置校验失败：{}", diagnostic_tail(&output)),
+        },
+        Err(error) => NginxDetection {
+            available: true,
+            config_valid: false,
+            binary: Some(resolved.binary),
+            config_file: (!resolved.config_file.is_empty()).then_some(resolved.config_file),
+            message: format!("已找到 Nginx，但无法执行配置校验：{error}"),
+        },
+    }
+}
+
 pub(crate) fn sync_site(config: &NginxConfig, gate_listen: &str, site: &ManagedSite) -> Result<()> {
     if !config.enabled {
         bail!("Nginx 内联适配未启用；请先在 [nginx] 中启用它，并确认 binary/include_dir 可用");
     }
-    let vhost = find_vhost(config, &site.host)?;
+    let config = resolve_config(config)?;
+    let vhost = find_vhost(&config, &site.host)?;
     let original = fs::read_to_string(&vhost)
         .with_context(|| format!("无法读取 Nginx 站点配置 {}", vhost.display()))?;
-    let include = include_path(config, &site.host)?;
+    let include = include_path(&config, &site.host)?;
     let previous_include = fs::read_to_string(&include).ok();
     let (updated, desired_include) = if site.enabled {
         (
@@ -52,7 +110,7 @@ pub(crate) fn sync_site(config: &NginxConfig, gate_listen: &str, site: &ManagedS
             .with_context(|| format!("无法更新 Nginx 站点配置 {}", vhost.display()))?;
     }
 
-    if let Err(error) = test_and_reload(config) {
+    if let Err(error) = test_and_reload(&config) {
         if vhost_changed {
             let _ = fs::write(&vhost, original);
         }
@@ -82,11 +140,149 @@ pub(crate) fn remove_site(
 
 #[allow(dead_code)]
 pub(crate) fn is_site_protected(config: &NginxConfig, host: &str) -> Result<bool> {
-    let vhost = find_vhost(config, host)?;
-    let include = include_path(config, host)?;
+    let config = resolve_config(config)?;
+    let vhost = find_vhost(&config, host)?;
+    let include = include_path(&config, host)?;
     let body = fs::read_to_string(&vhost)
         .with_context(|| format!("无法读取 Nginx 站点配置 {}", vhost.display()))?;
     Ok(include.exists() && body.contains(&format!("{MARKER_PREFIX}{host}:begin")))
+}
+
+fn resolve_binary(binary: &str) -> Result<String> {
+    let requested = binary.trim();
+    if !requested.is_empty() && !is_default_binary(requested) {
+        if can_execute(requested) {
+            return Ok(requested.to_string());
+        }
+        bail!("无法执行配置中的 Nginx：{requested}");
+    }
+
+    if can_execute("nginx") {
+        return Ok("nginx".to_string());
+    }
+    let candidates = nginx_binary_candidates();
+    let existing = first_existing_binary(candidates.clone())
+        .filter(|path| can_execute(&path.to_string_lossy()));
+    if let Some(path) = existing {
+        return Ok(path.to_string_lossy().into_owned());
+    }
+    bail!(
+        "未找到 Nginx。已自动检查 PATH 和常见安装目录；请确认 Nginx 正在本机安装并可执行。已检查：{}",
+        candidates
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
+}
+
+fn is_default_binary(binary: &str) -> bool {
+    binary.eq_ignore_ascii_case("nginx") || binary.eq_ignore_ascii_case("nginx.exe")
+}
+
+fn can_execute(binary: &str) -> bool {
+    Command::new(binary).arg("-v").output().is_ok()
+}
+
+fn nginx_binary_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(current_dir) = env::current_dir() {
+        candidates.push(current_dir.join(if cfg!(target_os = "windows") {
+            "nginx.exe"
+        } else {
+            "nginx"
+        }));
+    }
+
+    candidates.extend(running_nginx_binary_candidates());
+    if let Ok(executable) = env::current_exe() {
+        if let Some(directory) = executable.parent() {
+            candidates.push(directory.join(if cfg!(target_os = "windows") {
+                "nginx.exe"
+            } else {
+                "nginx"
+            }));
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        let roots = [
+            PathBuf::from(r"C:\nginx"),
+            env::var_os("ProgramFiles").map(PathBuf::from),
+            env::var_os("ProgramFiles(x86)").map(PathBuf::from),
+            env::var_os("ProgramW6432").map(PathBuf::from),
+            env::var_os("LOCALAPPDATA").map(PathBuf::from),
+            env::var_os("USERPROFILE").map(PathBuf::from),
+        ];
+        for root in roots.into_iter().flatten() {
+            candidates.push(root.join("nginx.exe"));
+            candidates.push(root.join("nginx").join("nginx.exe"));
+            candidates.push(root.join("nginx").join("sbin").join("nginx.exe"));
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    candidates.extend([
+        PathBuf::from("/opt/homebrew/bin/nginx"),
+        PathBuf::from("/usr/local/bin/nginx"),
+        PathBuf::from("/usr/local/nginx/sbin/nginx"),
+        PathBuf::from("/usr/sbin/nginx"),
+        PathBuf::from("/opt/nginx/sbin/nginx"),
+    ]);
+
+    let mut seen = HashSet::new();
+    candidates
+        .into_iter()
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+#[cfg(target_os = "windows")]
+fn running_nginx_binary_candidates() -> Vec<PathBuf> {
+    let output = Command::new("powershell.exe")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "(Get-CimInstance Win32_Process -Filter \"Name = 'nginx.exe'\" | Select-Object -First 1 -ExpandProperty ExecutablePath)",
+        ])
+        .output();
+    output
+        .ok()
+        .into_iter()
+        .flat_map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .map(PathBuf::from)
+                .collect::<Vec<_>>()
+        })
+        .filter(|path| !path.as_os_str().is_empty())
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn running_nginx_binary_candidates() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn first_existing_binary<I>(candidates: I) -> Option<PathBuf>
+where
+    I: IntoIterator<Item = PathBuf>,
+{
+    candidates.into_iter().find(|path| path.is_file())
+}
+
+fn diagnostic_tail(output: &std::process::Output) -> String {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stderr
+        .lines()
+        .last()
+        .or_else(|| stdout.lines().last())
+        .unwrap_or("unknown nginx error")
+        .trim()
+        .to_string()
 }
 
 fn test_and_reload(config: &NginxConfig) -> Result<()> {
@@ -413,5 +609,24 @@ mod tests {
         let snippet = render_include("http://127.0.0.1:8080");
         assert!(snippet.contains("proxy_pass http://127.0.0.1:8080/_bot_gate/check;"));
         assert!(!snippet.contains("http://http://"));
+    }
+
+    #[test]
+    fn selects_an_installed_binary_when_nginx_is_not_on_path() {
+        let root = std::env::temp_dir().join(format!("bot-gate-nginx-test-{}", std::process::id()));
+        fs::create_dir_all(&root).unwrap();
+        let installed = root.join(if cfg!(target_os = "windows") {
+            "nginx.exe"
+        } else {
+            "nginx"
+        });
+        fs::write(&installed, b"test").unwrap();
+
+        assert_eq!(
+            first_existing_binary([root.join("missing"), installed.clone()]),
+            Some(installed)
+        );
+
+        let _ = fs::remove_dir_all(root);
     }
 }

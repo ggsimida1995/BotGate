@@ -83,7 +83,9 @@ file = "data/license.key"
 # Nginx inline adapter. Paths are environment-specific and must not be hardcoded
 # in the app bundle. When vhost_dir is empty, Bot Gate runs `nginx -T` and
 # discovers the files that the active Nginx actually loaded.
-# binary = "nginx" uses PATH; set an absolute path only when Nginx is not in PATH.
+# binary = "nginx" enables automatic discovery through PATH, common locations,
+# and the running nginx.exe process on Windows. The dashboard has an advanced
+# path override for stopped installations with a custom location.
 # config_file = "" uses Nginx's compiled/default config; set it for `nginx -c`.
 # include_dir is resolved relative to this config file.
 [nginx]

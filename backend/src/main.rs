@@ -32,9 +32,9 @@ use admin::{
     admin_delete_ban, admin_delete_site, admin_delete_whitelist, admin_gateway_start,
     admin_gateway_status, admin_gateway_stop, admin_interception_detail, admin_list_bans,
     admin_list_challenges, admin_list_interceptions, admin_list_requests, admin_list_sites,
-    admin_list_whitelist, admin_page, admin_reload_config, admin_request_detail, admin_save_ban,
-    admin_save_nginx, admin_save_site, admin_save_whitelist, admin_system, admin_toggle_site,
-    admin_update_apply, admin_update_check, admin_update_progress,
+    admin_list_whitelist, admin_nginx_detect, admin_page, admin_reload_config,
+    admin_request_detail, admin_save_ban, admin_save_nginx, admin_save_site, admin_save_whitelist,
+    admin_system, admin_toggle_site, admin_update_apply, admin_update_check, admin_update_progress,
 };
 use anyhow::{bail, Context, Result};
 use axum::{
@@ -1035,6 +1035,7 @@ async fn run() -> Result<()> {
             )
             .route("/api/dashboard", get(admin_dashboard))
             .route("/api/system", get(admin_system))
+            .route("/api/nginx/detect", get(admin_nginx_detect))
             .route("/api/nginx/config", post(admin_save_nginx))
             .route("/api/update/check", get(admin_update_check))
             .route("/api/update/apply", post(admin_update_apply))

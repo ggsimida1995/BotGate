@@ -368,6 +368,21 @@ function AdminConsole() {
     }
   }
 
+  async function detectNginx() {
+    try {
+      const result = await api("/api/nginx/detect");
+      setSystemInfo((current) => ({
+        ...current,
+        nginx_detection: result.nginx_detection,
+      }));
+      message[result.nginx_detection.config_valid ? "success" : "warning"](
+        result.nginx_detection.message,
+      );
+    } catch (cause) {
+      message.error(cause.message);
+    }
+  }
+
   async function saveSite(values) {
     try {
       await api("/api/sites", {
@@ -728,10 +743,32 @@ function AdminConsole() {
                   <Alert
                     type="info"
                     showIcon
-                    message="设置会保存到本机 SQLite，重启应用或刷新页面后仍然保留。"
-                    description="vhost 目录留空时，Bot Gate 会执行 nginx -T 自动发现实际加载的站点配置；只有 Nginx 不在 PATH 或使用自定义主配置时才需要填写 binary、config_file。修改配置后，已存在的站点请在“站点路由”中重新保存一次。"
+                    message="Bot Gate 会自动寻找本机正在运行的 Nginx"
+                    description="Windows 会从运行中的 nginx.exe 读取实际安装位置；其他系统会检查 PATH 和常见安装目录。Nginx 的站点配置文件也会通过 nginx -T 自动发现，正常使用不需要填写安装路径。"
                     style={{ marginBottom: 16 }}
                   />
+                  {systemInfo.nginx_detection && (
+                    <Alert
+                      type={
+                        systemInfo.nginx_detection.config_valid
+                          ? "success"
+                          : "warning"
+                      }
+                      showIcon
+                      message={systemInfo.nginx_detection.message}
+                      description={
+                        systemInfo.nginx_detection.binary
+                          ? `程序：${systemInfo.nginx_detection.binary}${systemInfo.nginx_detection.config_file ? `；配置：${systemInfo.nginx_detection.config_file}` : "；配置：使用 Nginx 默认配置"}`
+                          : "请先启动 Nginx；如果 Nginx 使用了非常规目录，可在高级设置中选择可执行文件。"
+                      }
+                      action={
+                        <Button size="small" onClick={detectNginx}>
+                          重新检测
+                        </Button>
+                      }
+                      style={{ marginBottom: 16 }}
+                    />
+                  )}
                   <Form
                     form={nginxForm}
                     layout="vertical"
@@ -745,34 +782,6 @@ function AdminConsole() {
                     >
                       <Switch />
                     </Form.Item>
-                    <Form.Item
-                      name="binary"
-                      label="Nginx 可执行文件"
-                      extra="默认使用 PATH 中的 nginx，也可以填写绝对路径。"
-                    >
-                      <Input placeholder="nginx" />
-                    </Form.Item>
-                    <Form.Item
-                      name="config_file"
-                      label="Nginx 主配置文件（可选）"
-                      extra="留空使用 nginx -T 的默认配置；填写后会以 -c 参数检查和重载。"
-                    >
-                      <Input placeholder="留空使用默认配置" />
-                    </Form.Item>
-                    <Form.Item
-                      name="vhost_dir"
-                      label="站点配置目录（可选）"
-                      extra="留空时通过 nginx -T 自动发现实际加载的配置文件。"
-                    >
-                      <Input placeholder="留空自动发现" />
-                    </Form.Item>
-                    <Form.Item
-                      name="include_dir"
-                      label="Bot Gate include 目录"
-                      extra="相对路径会按应用配置文件所在目录解析；建议每台机器使用 data/nginx。"
-                    >
-                      <Input placeholder="data/nginx" />
-                    </Form.Item>
                     <Button
                       type="primary"
                       htmlType="submit"
@@ -780,6 +789,27 @@ function AdminConsole() {
                     >
                       保存 Nginx 设置
                     </Button>
+                    <details className="nginx-advanced-settings">
+                      <summary>高级设置：自定义 Nginx 路径</summary>
+                      <Text type="secondary">
+                        只有 Nginx 未启动、且安装目录不在 PATH 或常见目录时才需要使用。普通用户无需填写。
+                      </Text>
+                      <Form.Item name="binary" label="Nginx 可执行文件">
+                        <Input placeholder="nginx 或 nginx.exe 的完整路径" />
+                      </Form.Item>
+                      <Form.Item name="config_file" label="Nginx 主配置文件">
+                        <Input placeholder="可选，例如 conf/nginx.conf" />
+                      </Form.Item>
+                      <Form.Item name="vhost_dir" label="站点配置目录">
+                        <Input placeholder="可选；留空自动发现" />
+                      </Form.Item>
+                      <Form.Item name="include_dir" label="Bot Gate include 目录">
+                        <Input placeholder="可选；默认 data/nginx" />
+                      </Form.Item>
+                      <Button type="primary" htmlType="submit">
+                        保存高级设置
+                      </Button>
+                    </details>
                   </Form>
                 </div>
               ),
@@ -898,7 +928,7 @@ function AdminConsole() {
                 }
                 description={
                   siteMode === "nginx"
-                    ? `Bot Gate 会在按 vhost 目录或 nginx -T 自动定位 Host，写入受控 include 后执行 nginx -t 和平滑重载。当前 Nginx 适配：${systemInfo.nginx?.enabled ? "已启用" : "未启用，请先配置 [nginx]"}`
+                    ? `Bot Gate 会自动定位 Nginx 和 Host 对应的 vhost，写入受控 include 后执行 nginx -t 和平滑重载。当前 Nginx：${systemInfo.nginx_detection?.config_valid ? "已检测并通过配置校验" : "未检测到可用配置"}`
                     : "源站必须只暴露给本机或内网，例如 127.0.0.1:18082；否则用户仍可绕过 Bot Gate 直接访问源站。"
                 }
                 style={{ marginBottom: 16 }}
